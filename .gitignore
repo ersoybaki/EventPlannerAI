@@ -1,4 +1,6 @@
 # Environment variables file
 .env
 /DeepLearningAI-Lectures/
+/__pycache__/
+/coding/
 /.ipynb_checkpoints/
