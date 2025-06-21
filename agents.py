@@ -8,10 +8,9 @@ gmaps = googlemaps.Client(key=os.environ.get("GOOGLEMAPS_API_KEY"))
 
 load_dotenv()
 llm_config = {
-    "model": "gpt-4o",
+    "model": "gpt-4-0613",
     "api_key": os.environ.get("OPENAI_API_KEY")
 }
-
 
 
 # Creating Agents for Event Planning Preferences
@@ -103,6 +102,19 @@ def create_preference_agents():
         is_termination_msg=lambda msg: "terminate" in msg.get("content").lower()
     )
 
+    preference_event_recommendation_agent = ConversableAgent(
+        name="Event_Recommendation_Agent",
+        system_message="""
+        You are an agent that recommends venues for the event based on the user's preferences.
+        You will receive a JSON object with the venues found according to the users's preferences.
+        Put the venues in a markdown format, talking about the venue's Name, Address and a description.
+        Return 'TERMINATE' when you have gathered all the information you need.
+        """,
+        llm_config=llm_config,
+        code_execution_config=False,
+        human_input_mode='NEVER',
+        is_termination_msg=lambda msg: "terminate" in msg.get("content").lower()
+    )
     preference_proxy_agent = UserProxyAgent(
         name="Event_Preference_Proxy_Agent",
         llm_config=llm_config,
@@ -119,55 +131,46 @@ def create_preference_agents():
         functions=[geocode_address, search_nearby_venues],
     )
 
-    # Code writer and executor
-    preference_recommendation_agent = AssistantAgent(
-        name="Preference_Recommendation_Agent",
+    # code executor
+    codeExecutor = AssistantAgent(
+        name="Code_Executor_Agent",
         system_message="""
-        You are a helpful event-planning assistant. You have two tools:
-        1) geocode_address(address: str) → returns lat/lng JSON
-        2) search_nearby_venues(lat: float, lng: float,
-                            radius: int, keyword: str,
-                            max_results: int) → returns list of venues
-        
-        When the user provides their preferences JSON, you should:
-        - Extract the location, event type, budget, participants, date/time, special requests
-        - Call geocode_address() on the user’s “location”
-        - Call search_nearby_venues() with appropriate parameters (e.g. radius 5000m,
-        keyword = event type, max_results = 5)
-        - Format the returned venues into a markdown list, including name, address,
-        and any other useful info.
-        
-        Do not call external APIs directly—use only the provided functions.
+        You are a code executor agent that executes code for the Event Planner.
+        You execute the incoming python code and reply with its stdout only.
         """,
         llm_config=llm_config,
         code_execution_config={"executor": preference_recommendation_executor},
         human_input_mode="NEVER",
-        is_termination_msg=lambda msg: "terminate" in msg.get("content", "").lower(),
     )
 
-    # Adding the functions from the venueAgent.py file to the preference_recommendation_agent
-    preference_recommendation_agent_system_message = preference_recommendation_agent.system_message
-    preference_recommendation_agent_system_message += preference_recommendation_executor.format_functions_for_prompt()
-    
+    # Code writer 
+    codeGenerator = AssistantAgent(
+        name="Code_Generator_Agent",
+        system_message="""
+            You are a code generator. When I give you a JSON of event preferences,
+            output ONLY a runnable Python code snippet, fenced as ```python```, that:
 
-    # Updating the system message of the preference_recommendation_agent with the functions
-    preference_recommendation_agent = AssistantAgent(
-        name="Preference_Recommendation_Agent",
-        system_message=preference_recommendation_agent_system_message,
+            1. imports json, geocode_address, search_nearby_venues  
+            2. loads the JSON into `prefs`  
+            3. calls geocode_address(prefs['location']) → loc  
+            4. calls search_nearby_venues(lat=loc[0], lng=loc[0], radius=5000,
+            keyword=prefs['type'], max_results=5) → venues  
+            5. prints json.dumps(venues)
+
+            Do NOT add any prose or markdown outside the ```python``` block.
+            """ + preference_recommendation_executor.format_functions_for_prompt(),
         llm_config=llm_config,
-        code_execution_config={"executor": preference_recommendation_executor},
+        code_execution_config=False,
         human_input_mode="NEVER",
-        is_termination_msg=lambda msg: "terminate" in msg.get("content", "").lower(),
     )
-
     return preference_event_type_agent, preference_event_participant_agent, \
            preference_event_budget_agent, preference_event_time_agent, \
            preference_event_location_agent, preference_event_request_agent, \
-           preference_proxy_agent,  preference_recommendation_agent
+           preference_proxy_agent, codeExecutor, codeGenerator, preference_event_recommendation_agent
 
 def preference_flow():
     type_agent, participant_agent, budget_agent, time_agent, \
-    location_agent, request_agent, proxy_agent, recommendation_agent = create_preference_agents()
+    location_agent, request_agent, proxy_agent, executor_agent, generator_agent, recommendation_agent = create_preference_agents()
 
     steps = [
         (type_agent, "Hello, welcome to the Event Planner. What's your name and What type of event would you like to plan?", "{'name': '', 'type': ''}"),
@@ -183,7 +186,7 @@ def preference_flow():
     for agent, question, json_schema in steps:
         chat = [{
             "sender": agent,
-            "recipient": proxy_agent,
+            "recipient": proxy_agent,   
             "message": question,
             "summary_method": "reflection_with_llm",
             "summary_args": {
@@ -203,18 +206,29 @@ def preference_flow():
         slot: dict = ast.literal_eval(clean)
         filled.update(slot)
     
-    preference_input = json.dumps(filled)
-    final_chat = [{
+    generate_code = [{
         "sender": proxy_agent,
-        "recipient": recommendation_agent,
-        "message": preference_input,
-        "max_turns": 10,
+        "recipient": generator_agent,
+        "message": json.dumps(filled),
+        "max_turns": 1,
         "clear_history": False,
-    },
 
-    ]
-    res = initiate_chats(final_chat)[0]
-    print(res.summary) 
+    }, 
+    {
+        "sender": generator_agent,
+        "recipient": executor_agent,
+        "message": "Please generate the code to find nearby venues based on the user's preferences.",
+        "max_turns": 1,
+        "clear_history": False,
+    },{
+        "sender": executor_agent,
+        "recipient": recommendation_agent,
+        "message": "Here is the result from the code to find nearby venues based on the user's preferences. Give the recommendations to the user.",
+        "max_turns": 1,
+        "clear_history": False,
+    }]
+    result = initiate_chats(generate_code)[0]
+    
 
 
 if __name__ == "__main__":

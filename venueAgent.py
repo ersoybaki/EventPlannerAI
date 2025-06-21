@@ -54,12 +54,12 @@ def geocode_address(address: str) -> tuple:
     geocode_result = gmaps.geocode(address)
     if geocode_result:
         loc = geocode_result[0]["geometry"]["location"]
-        return loc["lat"], loc["lng"]
+        return [loc["lat"], loc["lng"]]
     else:
         raise ValueError("Address not found.")
 
 
-def search_nearby_venues(location: tuple, radius: int = 5000, place_type: str = None, keyword: str = None) -> list:
+def search_nearby_venues(lat: float, lng: float, radius: int = 5000, place_type: str = None, keyword: str = None, max_results: int = 5) -> list:
     """
     Retrieve a list of nearby venues matching specified criteria.
 
@@ -80,6 +80,8 @@ def search_nearby_venues(location: tuple, radius: int = 5000, place_type: str = 
     from dotenv import load_dotenv
     
     gmaps  = googlemaps.Client(key=os.environ.get("GOOGLEMAPS_API_KEY"))
+
+    location = (lat, lng) 
     places_result = gmaps.places_nearby(
         location=location,
         radius=radius,
@@ -87,8 +89,8 @@ def search_nearby_venues(location: tuple, radius: int = 5000, place_type: str = 
         keyword=keyword,
         min_price=0,
     )
-    return places_result.get('results', [])
-
+    results = places_result.get('results', [])
+    return results[:max_results]  
 
 if __name__ == "__main__":
     # Example usage
