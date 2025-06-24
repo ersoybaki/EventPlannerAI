@@ -2,6 +2,7 @@ import os
 import googlemaps
 from dotenv import load_dotenv
 
+gmaps  = googlemaps.Client(key=os.environ.get("GOOGLEMAPS_API_KEY"))
 
 # def get_gmaps_client() -> googlemaps.Client:
 #     """
@@ -92,6 +93,7 @@ def search_nearby_venues(lat: float, lng: float, radius: int = 5000, place_type:
     results = places_result.get('results', [])
     return results[:max_results]  
 
+
 if __name__ == "__main__":
     # Example usage
     user_loc = "Eindhoven, Netherlands"
@@ -102,15 +104,16 @@ if __name__ == "__main__":
         exit(1)
 
     venues = search_nearby_venues(
-        location=(lat, lng),
+        lat=lat,
+        lng=lng,
         radius=2000,
         place_type='restaurant',
         keyword='event venue'
     )
 
-    if len(venues) > 2:
-        print("Third venue found:", venues[2]["name"])
-    elif venues:
-        print("First venue found:", venues[0]["name"])
-    else:
-        print("No venues found.")
+    venue1 = venues[0]["place_id"]
+
+    details = gmaps.place(place_id=venue1, fields=["name", "rating", "user_ratings_total", "opening_hours"])
+
+    opening_hours = details.get("result", {}).get("opening_hours", {})
+    print(opening_hours)
