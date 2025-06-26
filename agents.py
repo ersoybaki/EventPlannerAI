@@ -1,4 +1,4 @@
-from autogen import ConversableAgent, UserProxyAgent, AssistantAgent, initiate_chats, ChatResult
+from autogen import ConversableAgent, UserProxyAgent, AssistantAgent, initiate_chats, ChatResult, GroupChat, GroupChatManager, register_function
 from autogen.coding import LocalCommandLineCodeExecutor
 from dotenv import load_dotenv
 from venueAgent import geocode_address, search_nearby_venues
@@ -19,8 +19,10 @@ def create_preference_agents():
     preference_event_type_agent = ConversableAgent(
         name="Event_Type_Preference_Agent",
         system_message="""
-        You are an agent that gets the type of event that the user wants to plan.
-        Do not ask the user for any other information and do not reply to the user.
+        You are responsible for getting the event type from the user.
+        Ask the user what type of event they want to plan.
+        Wait for the answer, then say "Thank you! I have the event type."
+        Only speak when it's your turn to collect event type information.
         Return 'TERMINATE' when you have gathered all the information you need.
         """,
         llm_config=llm_config,
@@ -34,7 +36,8 @@ def create_preference_agents():
         system_message="""
         You are an agent that gets the number of participants of the event that the user wants to plan.
         The integer returned should be the number of participants.
-        Do not ask the user for any other information and do not reply to the user.
+        Wait for the answer, then say "Thank you! I have the number of participants for the event."
+        Only speak when it's your turn to collect the number of participants that will attend the event.
         Return 'TERMINATE' when you have gathered all the information you need.
         """,
         llm_config=llm_config,
@@ -50,7 +53,8 @@ def create_preference_agents():
         If the user only provides a value, assume it is the budget per person.
         Make sure that the total budget is equal to the budget per person multiplied with the number of participants.
         If the user provides the total budget, make sure that budget per person is equal to the total budget divided by the number of participants.
-        Do not ask the user for any other information and do not reply to the user.
+        Wait for the answer, then say "Thank you! I have the budget for the event."
+        Only speak when it's your turn to collect the budget for the event.
         Return 'TERMINATE' when you have gathered all the information you need.
         """,
         llm_config=llm_config,
@@ -75,19 +79,8 @@ def create_preference_agents():
                 - “evening” → “18:00”
                 - “night” → “20:00”
                 - “midnight” → “00:00”
-
-                    When you have all fields, output **exactly** and then stop:
-
-                    - **Single date+time**  
-                    ```json
-                    {
-                        "start_date": "YYYY-MM-DD",
-                        "end_date":   "YYYY-MM-DD",
-                        "time":       "HH:MM",
-                        "weekday":    "DayName"
-                    }
-                    TERMINATE
-
+            Wait for the answer, then say "Thank you! I have the event time."
+            Only speak when it's your turn to collect event time information.
         """,
         llm_config=llm_config,
         code_execution_config=False,
@@ -100,7 +93,8 @@ def create_preference_agents():
         system_message="""
         You are an agent that gets the location of the event that the user wants to plan.
         The user will provide a general location, such as a city or a street, or a specific location.
-        Do not ask the user for any other information.
+        Wait for the answer, then say "Thank you! I have the location of the event."
+        Only speak when it's your turn to collect event location information.
         Return 'TERMINATE' when you have gathered all the information you need.
         """,
         llm_config=llm_config,
@@ -115,7 +109,8 @@ def create_preference_agents():
         You are an agent that gets the user's special requests for the event they want to plan if they have any.
         The user will provide a request, such as "vegan food" or "wheelchair accessibility".
         If the user does not have any special requests, you can return 'TERMINATE'.
-        Do not ask the user for any other information.
+        Wait for the answer, then say "Thank you! I have the special requests for the event."
+        Only speak when it's your turn to collect special requests for the event information.
         Return 'TERMINATE' when you have gathered all the information you need.
         """,
         llm_config=llm_config,
@@ -154,7 +149,7 @@ def create_preference_agents():
         llm_config=llm_config,
         code_execution_config=False,
         human_input_mode='ALWAYS',
-        is_termination_msg=lambda msg: "terminate" in msg.get("content").lower() or "TERMINATE" in msg.get("content").upper()
+        is_termination_msg = lambda x: x.get("content", "").rstrip().endswith("TERMINATE") if x.get("content") else False, 
     )
 
 
@@ -168,12 +163,7 @@ def create_preference_agents():
     # code executor
     codeExecutor = AssistantAgent(
         name="Code_Executor_Agent",
-        system_message="""
-        You are a code executor agent that executes code for the Event Planner.
-        You execute the incoming python code and reply with its stdout only.
-        """,
-        llm_config=llm_config,
-        code_execution_config={"executor": preference_recommendation_executor},
+        code_execution_config={"work_dir": "coding", "use_docker": False},
         human_input_mode="NEVER",
     )
 
@@ -187,7 +177,7 @@ def create_preference_agents():
             1. imports json, geocode_address, search_nearby_venues  
             2. loads the JSON into `prefs`  
             3. calls geocode_address(prefs['location']) → loc  
-            4. calls search_nearby_venues(lat=loc[0], lng=loc[0], radius=5000,
+            4. calls search_nearby_venues(lat=loc[0], lng=loc[1], radius=5000,
             keyword=prefs['type'], max_results=5) → venues  
             5. prints json.dumps(venues)
 
@@ -197,73 +187,150 @@ def create_preference_agents():
         code_execution_config=False,
         human_input_mode="NEVER",
     )
+
+    
+    register_function(
+        geocode_address,
+        caller=codeGenerator,
+        executor=preference_proxy_agent,
+        name="geocode_address",
+        description="Geocode an address to get its latitude and longitude.",
+    )
+    register_function(
+        search_nearby_venues,
+        caller=codeGenerator,
+        executor=preference_proxy_agent,
+        name="search_nearby_venues",
+        description="Search for nearby venues based on latitude, longitude, radius, keyword, and maximum results.",
+    )
+
+    coordinator_agent = ConversableAgent(
+        name="Coordinator_Agent",
+        system_message="""
+        You coordinate the event planning process.
+        Keep track of what information has been collected:
+        - Event type: [PENDING/COLLECTED]
+        - Participants: [PENDING/COLLECTED] 
+        - Budget: [PENDING/COLLECTED]
+        - Time: [PENDING/COLLECTED]
+        - Location: [PENDING/COLLECTED]
+        - Special requests: [PENDING/COLLECTED]
+        
+        Direct the conversation to the next agent that needs to collect information.
+        When all information is collected, trigger the venue search.
+        """,
+    )
+
     return preference_event_type_agent, preference_event_participant_agent, \
            preference_event_budget_agent, preference_event_time_agent, \
            preference_event_location_agent, preference_event_request_agent, \
-           preference_proxy_agent, codeExecutor, codeGenerator, preference_event_recommendation_agent
+           preference_proxy_agent, codeExecutor, codeGenerator, preference_event_recommendation_agent, coordinator_agent
+    
+def custom_speaker_selection(last_speaker, groupchat):
+    
+    # Define the conversation flow order
+    flow_order = [
+        # Start and coordinate
+        "Coordinator_Agent",       
+           
+        "Event_Type_Preference_Agent",       
+        "Event_Preference_Proxy_Agent",  
 
-def preference_flow():
-    type_agent, participant_agent, budget_agent, time_agent, \
-    location_agent, request_agent, proxy_agent, executor_agent, generator_agent, recommendation_agent = create_preference_agents()
+        "Event_Participant_Preference_Agent",   
+        "Event_Preference_Proxy_Agent",
 
-    steps = [
-        (type_agent, "Hello, welcome to the Event Planner. What type of event would you like to plan?", "{'event_type': ''}"),
-        (participant_agent, "What is the number of participants that will be attending the event?", "{'number_participants': 0}"),
-        (budget_agent, "What is your budget per person for the event? If you prefer to input a total budget, please specify that.", "{'budget_per_person': 0, 'total_budget': 0}"),
-        (time_agent, "What dates do you want to plan the event for? Please provide a range or a specific date, and also specify the time of day.", "{'start_date': '', 'end_date': '', 'time': '', 'weekday': ''}"),
-        (location_agent, "What is the location of the event? You can provide a general location or a specific address.", "{'location': ''}"),
-        (request_agent, "Do you have any special requests for the event? If not, you can say 'no'.", "{'special_requests': ''}"),
+        "Event_Budget_Preference_Agent",        
+        "Event_Preference_Proxy_Agent",  
+
+        "Event_Time_Preference_Agent",         
+        "Event_Preference_Proxy_Agent",    
+
+        "Event_Location_Preference_Agent",      
+        "Event_Preference_Proxy_Agent",   
+
+        "Event_Request_Preference_Agent",       
+        "Event_Preference_Proxy_Agent",  
+
+        "Coordinator_Agent",                    
+        "Code_Generator_Agent",                
+        "Code_Executor_Agent",                 
+        "Event_Recommendation_Agent",           
     ]
-
-    filled = {}
-
-    for agent, question, json_schema in steps:
-        chat = [{
-            "sender": agent,
-            "recipient": proxy_agent,   
-            "message": question,
-            "summary_method": "reflection_with_llm",
-            "summary_args": {
-                "summary_prompt": f"Return the user preference as a JSON object only: {json_schema}",
-            },
-            "max_turns": 1,
-            "clear_history": False,
-        }]
-
-        result = initiate_chats(chat)
-        chat_res: ChatResult = result[0]
-        raw = chat_res.summary
-
-        # if there’s any stray fences, remove them
-        clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
-
-        slot: dict = ast.literal_eval(clean)
-        filled.update(slot)
     
-    generate_code = [{
-        "sender": proxy_agent,
-        "recipient": generator_agent,
-        "message": json.dumps(filled),
-        "max_turns": 1,
-        "clear_history": False,
+    messages = groupchat.messages
+    last_speaker_name = last_speaker.name if last_speaker else ""
 
-    }, 
-    {
-        "sender": generator_agent,
-        "recipient": executor_agent,
-        "message": "Please generate the code to find nearby venues based on the user's preferences.",
-        "max_turns": 1,
-        "clear_history": False,
-    },{
-        "sender": executor_agent,
-        "recipient": recommendation_agent,
-        "message": "Here is the result from the code to find nearby venues based on the user's preferences. Give the recommendations to the user.",
-        "max_turns": 1,
-        "clear_history": False,
-    }]
-    result = initiate_chats(generate_code)[0]
+    # Check if we've reached the recommendation phase and if recommendations have been provided
+    def has_recommendations_been_provided():
+        # Check recent messages first
+        for msg in reversed(messages):  
+            if (hasattr(msg, 'name') and msg.name == "Event_Recommendation_Agent" and  msg.content and len(msg.content.strip()) > 50):
+                if any(keyword in msg.content.lower() for keyword in 
+                       ['recommendation', 'suggest', 'option', 'event', 'venue']):
+                    return True
+        return False
     
+    # If we're past the basic flow and recommendations have been provided, allow for follow-up questions or end the conversation
+    if len(messages) >= len(flow_order) and has_recommendations_been_provided():
 
+        # Check if the last message was from user asking follow-up questions
+        if (last_speaker_name == "Event_Preference_Proxy_Agent" and 
+            messages and messages[-1].content):
+            return groupchat.agent_by_name("Coordinator_Agent")
+        else:
+            return groupchat.agent_by_name("Coordinator_Agent")
+        
 
+    # Follow the original flow structure
+    if len(messages) < len(flow_order):
+        try:
+            next_agent_name = flow_order[len(messages)]
+            return groupchat.agent_by_name(next_agent_name)
+        except:
+            pass
+    
+    # If we've gone through the flow but recommendations haven't been provided yet, ensure we get to the recommendation agent
+    if not has_recommendations_been_provided():
+        return groupchat.agent_by_name("Event_Recommendation_Agent")
+    
+    # Default fallback
+    return groupchat.agents[0]
+
+def group_chat_recommendations():
+    type_agent, participant_agent, budget_agent, time_agent, \
+    location_agent, request_agent, proxy_agent, executor_agent, generator_agent, recommendation_agent, coordinator_agent = create_preference_agents()
+
+    group_chat = GroupChat(
+         agents=[
+            coordinator_agent,      
+            type_agent,            
+            participant_agent,    
+            budget_agent,          
+            time_agent,           
+            location_agent,      
+            request_agent,        
+            generator_agent,      
+            executor_agent,       
+            recommendation_agent, 
+            proxy_agent          
+        ],
+        messages=[],
+        speaker_selection_method=custom_speaker_selection,
+        max_round=30,
+    )
+
+    group_chat_manager = GroupChatManager(
+        groupchat=group_chat,
+        llm_config=llm_config,
+        human_input_mode="NEVER",
+        code_execution_config=False,
+    )
+
+    results = proxy_agent.initiate_chat(group_chat_manager,
+        messages="Hello, welcome to the Event Planner. What type of event would you like to plan?", 
+        max_turns=35, 
+        clear_history=True,)
+
+    return results
 if __name__ == "__main__":
-    preference_flow()
+    group_chat_recommendations()
