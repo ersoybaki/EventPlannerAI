@@ -1,5 +1,4 @@
-import os
-import googlemaps
+import os, googlemaps, parsedatetime, datetime
 from dotenv import load_dotenv
 from collections import defaultdict
 
@@ -8,8 +7,18 @@ DIETARY_KEYWORDS = {
     "vegan": ["vegan", "100% plant-based", "dairy-free"],
     "gluten_free": ["gluten-free", "celiac", "no gluten"],
     "halal": ["halal", "zabiha", "halāl"],
-    "steak_house": ["steak house", "steakhouse", "grill"],
+    "steak": ["steak house", "steakhouse", "grill"],
     "pescatarian": ["pescatarian", "seafood only", "fish only"],
+}
+
+WEEKDAY_TO_NUM = {
+    "Monday": 0,
+    "Tuesday": 1,
+    "Wednesday": 2,
+    "Thursday": 3,
+    "Friday": 4,
+    "Saturday": 5,
+    "Sunday": 6,
 }
 
 gmaps  = googlemaps.Client(key=os.environ.get("GOOGLEMAPS_API_KEY"))
@@ -120,7 +129,8 @@ def get_venues_by_budget(lat: float,
                          place_type: str = None,
                          keyword: str = None,
                          budget_per_person: float = 0.0,  # in euros
-                         max_results: int = 5) -> list[dict]:
+                         max_results: int = 10,
+                         event_day: str = None) -> list[dict]:
 
     """
     Search for nearby venues whose price level matches a user’s per-person budget.
@@ -177,7 +187,6 @@ def get_venues_by_budget(lat: float,
     else:
         level = 4      # €61+ 
 
-
     # build nearby search params, using min_price=max_price=level
     params = {
         "location": (lat, lng),
@@ -193,91 +202,247 @@ def get_venues_by_budget(lat: float,
     response = gmaps.places_nearby(**params)
     results = response.get("results", [])
 
-    return results[:max_results]
+    return results[:max_results]  
 
-def get_venues_by_budget_and_dietary(lat: float,
+
+def get_venues_by_budget_and_requests(lat: float,
                                      lng: float,
                                      radius: int = 5_000,
                                      place_type: str = None,
                                      keyword: str = None,
                                      budget_per_person: float = 0.0,
-                                     dietary_keyword: str = None,
+                                     special_request: str = None,
+                                     event_time: str = None,
                                      max_results: int = 5) -> list[dict]:
     """
-    Find venues that match BOTH a per-person budget and an optional dietary tag.
+    Return nearby venues that satisfy **all** of the following, in order:
 
-    1) Uses get_venues_by_budget(...) to fetch up to max_results places
-       at the appropriate Google price_level.
-    2) If dietary_keyword is provided, for each budget-filtered venue:
-         a) pull its reviews via gmaps.place()
-         b) run dietary_request(...) over the texts
-         c) keep only those venues where the requested dietary_keyword hit count ≥1
-         d) attach a `dietary_tags` dict for full tag breakdown
-    3) Return the filtered (and possibly annotated) list.
+    1. **Budget** – the place’s Google `price_level` (0–4) must match the
+       `budget_per_person` bracket (see mapping below).
+    2. **Opening hours** – if `event_time` is supplied, the venue must be
+       open at that exact day & time (fuzzy phrases like “tomorrow 18:30”
+       are accepted via `get_event_day_and_time`).
+    3. **Dietary tag** – if `dietary_keyword` is supplied, at least one user
+       review must contain that keyword (case-insensitive).  A per-venue
+       ``dietary_tags`` dict is added with hit counts for all tags.
 
-    Parameters:
-        lat, lng (float): center of search
-        radius (int): meters
-        place_type (str): e.g. "restaurant", "cafe"
-        keyword (str): free-text search term
-        budget_per_person (float): € per head → price_level 0–4
-        dietary_keyword (str, optional): one of your DIETARY_KEYWORDS keys, e.g. "vegan"
-        max_results (int): cap on number of places to fetch
+    The search is performed in three passes:
+    * *Nearby Search* → budget filter  
+      (delegates to `get_venues_by_budget`, cap =`max_results`).
+    * *Place Details* → opening-hours filter (`is_open` helper).  
+      Skipped if `event_time` is ``None``.
+    * *Place Details* → review / dietary filter (`dietary_request`).  
+      Skipped if `dietary_keyword` is ``None``.
 
-    Returns:
-        List[dict]: the budget-and-diet-filtered place dicts
+    ----------
+    Parameters
+    ----------
+    lat, lng : float  
+        Latitude / longitude of the search center.
+    radius : int, default **5000**  
+        Search radius in metres.
+    place_type : str | None  
+        Google Places “type” filter (e.g. ``"restaurant"``).
+    keyword : str | None  
+        Additional free-text keyword to refine the Nearby Search.
+    budget_per_person : float  
+        Maximum spend **per person in euros**.  Mapped to
+        ``price_level`` as:  
+        ``≤ 0 € → 0``, ``1–10 € → 1``, ``11–30 € → 2``,
+        ``31–60 € → 3``, ``≥ 61 € → 4``.
+    dietary_keyword : str | None  
+        Dietary tag to look for in reviews (e.g. ``"vegan"``, ``"halal"``).
+    event_time : str | None  
+        Desired date/time the event will take place  
+        (e.g. ``"tomorrow evening"``, ``"09-07-2025 18:00"``).  
+        If omitted, no opening-hours check is applied.
+    max_results : int, default **5**  
+        Maximum number of venues returned *after* all filters.
+
+    ----------
+    Returns
+    ----------
+    list[dict]  
+        Google place dictionaries that meet every active constraint.
+        If a diet filter is applied, each dict also contains:
+
+        ``"dietary_tags" : dict[str, int]`` – keyword hit counts across reviews.
+
+    ----------
+    Raises
+    ----------
+    • `ValueError`   – if `event_time` cannot be parsed.  
+    • `googlemaps.exceptions.ApiError`   – propagated from any Places API call.
     """
+    day_name, time = get_event_day_and_time(event_time) 
+    day = WEEKDAY_TO_NUM[day_name]
 
+    combined_keyword = " ".join(filter(None, [keyword, special_request]))
+    
     # filter venues by budget
     venues = get_venues_by_budget(
-        lat, lng, radius,
-        place_type, keyword,
-        budget_per_person,
-        max_results
+        lat=lat, lng=lng,
+        radius=radius,
+        place_type=place_type,
+        keyword=combined_keyword or None,
+        budget_per_person=budget_per_person,
+        max_results=max_results
     )
 
-    # filter venues by dietary keyword if provided
-    if dietary_keyword:
-        filtered = []
+    # filter venues by opening hours
+    if event_time:
+        still_open = []
         for v in venues:
-            # look into reviews
             details = gmaps.place(
                 place_id=v["place_id"],
-                fields=["reviews"]
+                fields=["opening_hours"],
             )
-            texts = [r["text"] for r in details["result"].get("reviews", [])]
-            tags = dietary_request(texts)
+            periods = (
+                details["result"]
+                .get("opening_hours", {})
+                .get("periods", [])
+            )
+            if periods and is_open(periods, day, time):
+                still_open.append(v)
+        venues = still_open
+    
+    # # filter venues by dietary keyword if provided
+    #     if special_request:
+    #         req_lower = special_request.lower()
+    #         filtered = []
+    #         for v in venues:
+    #             # fetch up to the first 5 reviews
+    #             details = gmaps.place(
+    #                 place_id=v["place_id"],
+    #                 fields=["reviews"]
+    #             )
+    #             reviews = [r["text"].lower() for r in details["result"].get("reviews", [])]
+    #             # count occurrences of the exact request phrase
+    #             match_count = sum(review.count(req_lower) for review in reviews)
+    #             if match_count > 0:
+    #                 # annotate how often we saw it
+    #                 v["request_matches"] = match_count
+    #                 filtered.append(v)
+    #         return filtered
 
-            if tags.get(dietary_keyword, 0) >= 1:
-                v["dietary_tags"] = tags
-                filtered.append(v)
-
-        return filtered
-
-    # if no dietary filter, just return the budget‐filtered list
+    # if no special_request, just return the budget (and hours) filtered list
     return venues
+    
+
+def get_event_day_and_time(event_date: str) -> tuple[str, str]:
+    """
+    Get the weekday name and time for a given date expression,
+    including fuzzy dates or explicit dates.
+
+    Args:
+        event_date (str): A date string or fuzzy date expression
+            (e.g., "tomorrow evening", "09-07-2025 14:30", "2025-07-09T09:15").
+
+    Returns:
+        tuple[str, str]:
+            - Weekday name (e.g., "Wednesday")
+            - Time string in HHMM format (e.g., "1830")
+
+    Raises:
+        ValueError: If the phrase could not be parsed into a date.
+    """
+    cal = parsedatetime.Calendar()
+    time_struct, parse_status = cal.parse(event_date)
+
+    if parse_status:
+        # parsedatetime succeeded
+        dt = datetime.datetime(*time_struct[:6])
+    else:
+        # fallback to explicit formats (with optional time)
+        dt = None
+        for fmt in (
+            "%d-%m-%Y %H:%M",
+            "%d-%m-%Y %H%M",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%dT%H:%M",
+            "%d-%m-%Y",
+            "%Y-%m-%d",
+        ):
+            try:
+                dt = datetime.datetime.strptime(event_date, fmt)
+                break
+            except ValueError:
+                continue
+
+        if dt is None:
+            raise ValueError(f"Could not parse the phrase: {event_date}")
+
+    weekday = dt.strftime("%A")
+    time_str = dt.strftime("%H%M")
+    return weekday, time_str
+
+
+def get_venue_opening_hours(results: list[dict]) -> list[tuple[str, dict[str, str]]]:
+    # Matching the opening hours with the prefered event time   
+    schedules: list[tuple[str, dict[str,str]]] = [] 
+    for place in results:
+        raw_pid = place.get("place_id")
+        raw_details = gmaps.place(place_id=raw_pid, fields=["name", "opening_hours"])
+
+        res = raw_details.get("result", {})
+        name = res.get("name", raw_pid)
+        raw = res.get("opening_hours", {}).get("weekday_text", [])
+
+        schedule: dict[str, str] = {}
+        for entry in raw:
+            day, times = entry.split(": ", 1)
+            schedule[day] = times
+
+        schedules.append((name, schedule))
+
+    return schedules
+
+def is_open(periods: list[dict], day: int, time: str) -> bool:
+    """
+    Return True if the venue is open on `user_day` at `user_hhmm`.
+
+    Args:
+        periods     Google `opening_hours.periods`
+        user_day    int 0-6 where 0 = Sunday
+        user_hhmm   "HHMM" (24-h)      e.g. "1845"
+
+    Handles periods that close after midnight, e.g.
+        open day=5 time=1130  →  close day=6 time=0100
+    """
+    t_user = int(time)
+
+    for p in periods:
+        o_day, o_time = p["open"]["day"],  int(p["open"]["time"])
+        c_day, c_time = p["close"]["day"], int(p["close"]["time"])
+
+        if o_day == c_day:                       # normal same-day period
+            if day == o_day and o_time <= t_user < c_time:
+                return True
+        else:                                    # crosses midnight
+            # part A: open-day slice (e.g. Fri 11:30-24:00)
+            if day == o_day and t_user >= o_time:
+                return True
+            # part B: after-midnight slice (e.g. Sat 00:00-01:00)
+            if day == c_day and t_user < c_time:
+                return True
+
+    return False
 
 
 if __name__ == "__main__":
-    location = "Eindhoven, Netherlands"
+    location = "Amsterdam, Netherlands"
     loc = geocode_address(location)
-    # venues = get_venues_with_dietary_tags(lat, lng,
-    #                                       radius=2000,
-    #                                       place_type="restaurant",
-    #                                       keyword="dinner",
-    #                                       max_results=5)
 
-    venues = get_venues_by_budget_and_dietary(loc[0], loc[1],
-                                  radius=5000,
-                                  place_type="restaurant",
-                                  keyword="restaurant",
-                                  budget_per_person=20,
-                                  dietary_keyword="vegetarian",
-                                  max_results=5)
-    # for place in venues:
-    #     if (len(place["dietary_tags"]) == 0):
-    #         continue
-    #     print(place["name"])
-    #     print("Dietary tags:", place["dietary_tags"])
-    #     print("---")
+    venues = get_venues_by_budget_and_requests(
+        lat=loc[0],
+        lng=loc[1],
+        radius=10000,
+        place_type="restaurant",
+        keyword="good wifi",
+        budget_per_person=80,
+        event_time="tomorrow evening",
+        max_results=5
+    )
     print(venues)
+
+

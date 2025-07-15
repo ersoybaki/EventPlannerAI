@@ -14,7 +14,6 @@ llm_config = {
     "api_key": os.environ.get("OPENAI_API_KEY")
 }
 
-    
 def custom_speaker_selection(last_speaker, groupchat):
     messages = groupchat.messages
     
@@ -48,61 +47,82 @@ def custom_speaker_selection(last_speaker, groupchat):
             elif '{"special_requests"' in content:
                 state["special_requests"] = True
     
+    # Debug print current state
+    print(f"Current state: {state}")
+    
+    selected_agent = None
+    
     # If last speaker was proxy agent with user input, route to appropriate preference agent
     if last_speaker and last_speaker.name == "Event_Preference_Proxy_Agent":
         if not state["event_type"]:
-            return groupchat.agent_by_name("Event_Type_Preference_Agent")
+            selected_agent = groupchat.agent_by_name("Event_Type_Preference_Agent")
         elif not state["participants"]:
-            return groupchat.agent_by_name("Event_Participant_Preference_Agent")
+            selected_agent = groupchat.agent_by_name("Event_Participant_Preference_Agent")
         elif not state["budget"]:
-            return groupchat.agent_by_name("Event_Budget_Preference_Agent")
+            selected_agent = groupchat.agent_by_name("Event_Budget_Preference_Agent")
         elif not state["time"]:
-            return groupchat.agent_by_name("Event_Time_Preference_Agent")
+            selected_agent = groupchat.agent_by_name("Event_Time_Preference_Agent")
         elif not state["location"]:
-            return groupchat.agent_by_name("Event_Location_Preference_Agent")
+            selected_agent = groupchat.agent_by_name("Event_Location_Preference_Agent")
         elif not state["special_requests"]:
-            return groupchat.agent_by_name("Event_Request_Preference_Agent")
+            selected_agent = groupchat.agent_by_name("Event_Request_Preference_Agent")
+        elif all(state.values()):
+            selected_agent = groupchat.agent_by_name("Code_Generator_Agent")
     
-    # If a preference agent just spoke, proxy should speak next
-    preference_agents = [
-        "Event_Type_Preference_Agent",
-        "Event_Participant_Preference_Agent",
-        "Event_Budget_Preference_Agent",
-        "Event_Time_Preference_Agent",
-        "Event_Location_Preference_Agent",
-        "Event_Request_Preference_Agent"
-    ]
-    
-    if last_speaker and last_speaker.name in preference_agents:
-        last_msg = messages[-1].get("content", "") if messages else ""
-        if any(pattern in last_msg for pattern in ['{"event_type"', '{"participants"', '{"budget_per_person"', '{"event_time"', '{"location"', '{"special_requests"']):
-            # Check if last preference was collected and move to the next one
-            if not state["participants"] and state["event_type"]:
-                return groupchat.agent_by_name("Event_Participant_Preference_Agent")
-            elif not state["budget"] and state["participants"]:
-                return groupchat.agent_by_name("Event_Budget_Preference_Agent")
-            elif not state["time"] and state["budget"]:
-                return groupchat.agent_by_name("Event_Time_Preference_Agent")
-            elif not state["location"] and state["time"]:
-                return groupchat.agent_by_name("Event_Location_Preference_Agent")
-            elif not state["special_requests"] and state["location"]:
-                return groupchat.agent_by_name("Event_Request_Preference_Agent")
-            elif all(state.values()):
-                # All data collected, move to code generation
-                return groupchat.agent_by_name("Code_Generator_Agent")
-        else:
-            return groupchat.agent_by_name("Event_Preference_Proxy_Agent")
-    
-    # code generation and execution flow
-    if last_speaker:
-        if last_speaker.name == "Code_Generator_Agent":
-            return groupchat.agent_by_name("Code_Executor_Agent")
+    # If a preference agent just spoke, determine next step
+    elif last_speaker:
+        preference_agents = [
+            "Event_Type_Preference_Agent",
+            "Event_Participant_Preference_Agent",
+            "Event_Budget_Preference_Agent",
+            "Event_Time_Preference_Agent",
+            "Event_Location_Preference_Agent",
+            "Event_Request_Preference_Agent"
+        ]
+        
+        if last_speaker.name in preference_agents:
+            last_msg = messages[-1].get("content", "") if messages else ""
+            
+            # Check if the agent just provided a JSON response
+            if any(pattern in last_msg for pattern in ['{"event_type"', '{"participants"', '{"budget_per_person"', '{"event_time"', '{"location"', '{"special_requests"']):
+                # Agent has collected data, move to next agent
+                if state["event_type"] and not state["participants"]:
+                    selected_agent = groupchat.agent_by_name("Event_Participant_Preference_Agent")
+                elif state["participants"] and not state["budget"]:
+                    selected_agent = groupchat.agent_by_name("Event_Budget_Preference_Agent")
+                elif state["budget"] and not state["time"]:
+                    selected_agent = groupchat.agent_by_name("Event_Time_Preference_Agent")
+                elif state["time"] and not state["location"]:
+                    selected_agent = groupchat.agent_by_name("Event_Location_Preference_Agent")
+                elif state["location"] and not state["special_requests"]:
+                    selected_agent = groupchat.agent_by_name("Event_Request_Preference_Agent")
+                elif all(state.values()):
+                    # All data collected, move to code generation
+                    selected_agent = groupchat.agent_by_name("Code_Generator_Agent")
+            else:
+                # Agent is asking a question, go to proxy for user input
+                selected_agent = groupchat.agent_by_name("Event_Preference_Proxy_Agent")
+        
+        # Handle code generation and execution flow
+        elif last_speaker.name == "Code_Generator_Agent":
+            selected_agent = groupchat.agent_by_name("Code_Executor_Agent")
         elif last_speaker.name == "Code_Executor_Agent":
-            return groupchat.agent_by_name("Event_Recommendation_Agent")
+            selected_agent = groupchat.agent_by_name("Event_Recommendation_Agent")
+        elif last_speaker.name == "Event_Recommendation_Agent":
+            # End of flow
+            selected_agent = None
     
-    # start with event type agent
-    return groupchat.agent_by_name("Event_Type_Preference_Agent")
-
+    # If no agent selected yet, start with event type agent
+    if selected_agent is None and len(messages) == 0:
+        selected_agent = groupchat.agent_by_name("Event_Type_Preference_Agent")
+    
+    # Debug print selected agent
+    if selected_agent:
+        print(f"Selected next speaker: {selected_agent.name}")
+    else:
+        print("No agent selected (conversation may be complete)")
+    
+    return selected_agent
 
 def extract_message_content(msg):
     if hasattr(msg, 'content'):
@@ -118,70 +138,106 @@ def extract_message_content(msg):
     
     return str(content)
 
-
 def process_chat_messages():
     if "manager" not in st.session_state:
         return
     
     messages = st.session_state.manager.groupchat.messages
     
-    # Initialize displayed_messages set 
-    if "displayed_messages" not in st.session_state:
-        st.session_state.displayed_messages = set()
+    # Initialize tracking sets
+    if "processed_indices" not in st.session_state:
+        st.session_state.processed_indices = set()
+    if "displayed_questions" not in st.session_state:
+        st.session_state.displayed_questions = set()
+    
+    # Debug print
+    print(f"Processing {len(messages)} messages, already processed: {len(st.session_state.processed_indices)}")
+    
+    new_messages_found = False
     
     for i, msg in enumerate(messages):
-        # Skip if already displayed
-        if i in st.session_state.displayed_messages:
+        # Skip if already processed
+        if i in st.session_state.processed_indices:
             continue
         
-        # Extract message details from dict
+        # Mark as processed immediately
+        st.session_state.processed_indices.add(i)
+        
+        # Extract message details
         if isinstance(msg, dict):
             content = msg.get("content", "")
             name = msg.get("name", "assistant")
             role = msg.get("role", "assistant")
         else:
-            content = extract_message_content(msg)
-            name = getattr(msg, "name", "assistant")
-            role = getattr(msg, "role", "assistant")
+            continue
+        
+        # Debug print
+        print(f"Processing message {i} from {name} (role: {role}): {content[:50]}...")
         
         # Skip empty messages
         if not content or content.strip() == "":
-            st.session_state.displayed_messages.add(i)
-            continue
-
-        # Skip input echoes
-        if name == "Event_Preference_Proxy_Agent" and role == "user":
-            st.session_state.displayed_messages.add(i)
             continue
         
-        # Skip termination messages
-        if "TERMINATE" in content.upper() or (content.strip().startswith("{") and content.strip().endswith("}")):
-            st.session_state.displayed_messages.add(i)
+        # Skip coordinator agent messages
+        if name == "Coordinator_Agent":
             continue
             
-        # For agents that provide both a message and JSON, split them
+        # Skip proxy agent messages (both user and assistant roles)
+        if name == "Event_Preference_Proxy_Agent":
+            continue
+        
+        # Handle preference agent messages
         if name in ["Event_Type_Preference_Agent", "Event_Participant_Preference_Agent", 
                     "Event_Budget_Preference_Agent", "Event_Time_Preference_Agent",
                     "Event_Location_Preference_Agent", "Event_Request_Preference_Agent"]:
-            # Look for JSON in the content
+            
+            # Split content into lines
             lines = content.split('\n')
-            message_to_add = None
+            
             for line in lines:
                 line = line.strip()
-                if line and not line.startswith('{') and not line.upper() == "TERMINATE":
-                    message_to_add = line
+                # Skip empty lines, JSON, and TERMINATE
+                if not line or line.startswith('{') or "TERMINATE" in line.upper():
+                    continue
+                
+                # This is a question/statement from the agent
+                if line not in st.session_state.displayed_questions:
+                    st.session_state.displayed_questions.add(line)
+                    # Check if it's already in history
+                    if line not in [h[1] for h in st.session_state.history]:
+                        st.session_state.history.append(("assistant", line))
+                        print(f"Added to history: {line}")
+                        new_messages_found = True
+                break
+            
+        elif name in ["Code_Generator_Agent", "Code_Executor_Agent"]:
+            # for these two, we still skip JSON but also skip fenced code:
+            if not (content.strip().startswith('{') or content.strip().startswith('[') or content.strip().startswith('exitcode')):
+                if content not in [h[1] for h in st.session_state.history]:
+                    st.session_state.history.append(("assistant", content))
+                    new_messages_found = True
 
-            if message_to_add:
-                # Check if the message is already displayed
-                already_displayed = any(h[1] == message_to_add for h in st.session_state.history)
-                if not already_displayed:
-                    st.session_state.history.append((role, message_to_add))
-        else:
-            already_displayed = any(h[1] == content for h in st.session_state.history)
-            if not already_displayed and name != "Event_Preference_Proxy_Agent":
-                st.session_state.history.append((role, content))
+        elif name == "Event_Recommendation_Agent":
+            # always append whatever markdown/code it spits out
+            if content not in [h[1] for h in st.session_state.history]:
+                st.session_state.history.append(("assistant", content))
+                new_messages_found = True
         
-        st.session_state.displayed_messages.add(i)
+    # If new messages were found, trigger a rerun
+    return new_messages_found
+
+
+# Add a custom message validator to prevent duplicates
+def message_validator(messages):
+    if len(messages) > 1:
+        last_message = messages[-1].get("content", "")
+        second_last = messages[-2].get("content", "") if len(messages) > 1 else ""
+        
+        # Prevent exact duplicate messages
+        if last_message == second_last:
+            return False
+    return True
+
 # UI
 st.title("Event Planner AI")
 st.markdown("Let me help you plan your perfect event!")
@@ -193,6 +249,8 @@ if "initialized" not in st.session_state:
     st.session_state.chat_started = False
     st.session_state.coordinator_agent = None  
     st.session_state.displayed_messages = set()  
+    st.session_state.processed_indices = set()
+    st.session_state.displayed_questions = set()
 
 if not st.session_state.initialized:
     # Create all agents
@@ -224,6 +282,7 @@ if not st.session_state.initialized:
         allow_repeat_speaker=True
     )
 
+    group_chat.message_validator = message_validator
     # Initialize manager    
     st.session_state.manager = GroupChatManager(
         groupchat=group_chat, 
@@ -232,11 +291,23 @@ if not st.session_state.initialized:
     )
     
     st.session_state.proxy = proxy_agent
-    st.session_state.initialized = True
+    st.session_state.initialized = True 
     
     # Add initial greeting
     st.session_state.history.append(("assistant", "Hello! Welcome to the Event Planner. What type of event would you like to plan?"))
 
+
+
+# Continuous message checking
+if st.session_state.initialized and "manager" in st.session_state:
+    # Check for unprocessed messages
+    if hasattr(st.session_state.manager.groupchat, 'messages'):
+        total_messages = len(st.session_state.manager.groupchat.messages)
+        processed_count = len(st.session_state.processed_indices) if "processed_indices" in st.session_state else 0
+        
+        if total_messages > processed_count:
+            print(f"Found {total_messages - processed_count} unprocessed messages")
+            process_chat_messages()
 
 # Display chat history
 for role, text in st.session_state.history:
@@ -248,10 +319,13 @@ for role, text in st.session_state.history:
 user_input = st.chat_input("Type your message here...")
 
 if user_input:
-    # Add user message to history and display
+    # Add user message to history and display it
     st.session_state.history.append(("user", user_input))
     with st.chat_message("user"):
         st.markdown(user_input)
+    
+    # Set flag to indicate we're waiting for response
+    st.session_state.waiting_for_response = True
     
     # Process the message
     with st.spinner("Processing your request..."):
@@ -259,6 +333,12 @@ if user_input:
             if not st.session_state.chat_started:
                 # Start the group chat
                 st.session_state.chat_started = True
+                
+                # Clear any previous processing state
+                if "processed_indices" in st.session_state:
+                    st.session_state.processed_indices = set()
+                if "displayed_questions" in st.session_state:
+                    st.session_state.displayed_questions = set()
                 
                 # Initiate the chat with the manager
                 st.session_state.proxy.initiate_chat(
@@ -274,8 +354,6 @@ if user_input:
                     request_reply=True
                 )
             
-            process_chat_messages()
-            
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
             st.error("Please check your API keys and try again.")
@@ -288,12 +366,8 @@ if user_input:
 
 # Sidebar
 with st.sidebar:
-    st.header("Controls")
-    if st.button("Reset Conversation"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
-    
+    st.header("Steps to Plan Your Event")
+  
     st.markdown("---")
     st.markdown("### Steps:")
     st.markdown("1. What type of event are you planning? ")

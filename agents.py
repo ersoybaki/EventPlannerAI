@@ -5,7 +5,7 @@ import os, sys, googlemaps
 import streamlit as st
 
 sys.path.insert(0, r'C:\Users\20231455\OneDrive - TU Eindhoven\Desktop\AI Agents\EventPlannerAI')
-from helperFunctions import geocode_address, search_nearby_venues, dietary_request, get_venues_by_budget, get_venues_by_budget_and_dietary
+from helperFunctions import geocode_address, search_nearby_venues, dietary_request, get_venues_by_budget, get_venues_by_budget_and_requests, get_event_day_and_time, get_venue_opening_hours, is_open
 
 
 gmaps = googlemaps.Client(key=os.environ.get("GOOGLEMAPS_API_KEY"))
@@ -16,58 +16,60 @@ llm_config = {
     "api_key": os.environ.get("OPENAI_API_KEY")
 }
 
-class TrackableAssistantAgent(AssistantAgent):
-    def _process_received_message(self, message, sender, silent):
-        # Extract actual message content
-        if isinstance(message, dict):
-            content = message.get("content", "")
-        else:
-            content = str(message)
-        
-        # Only display meaningful messages
-        if content and not content.startswith('{"content"'):
-            with st.chat_message(sender.name):
-                st.markdown(content)
-        
-        return super()._process_received_message(message, sender, silent)
+if "shown" not in st.session_state:
+    st.session_state.shown = set()  
 
-class TrackableUserProxyAgent(UserProxyAgent):
-    def _process_received_message(self, message, sender, silent):
-        # Extract actual message content
-        if isinstance(message, dict):
-            content = message.get("content", "")
-        else:
-            content = str(message)
-        
-        # Only display meaningful messages from user
-        if content and not content.startswith('{"content"') and sender.name != "Event_Preference_Proxy_Agent":
-            with st.chat_message(sender.name):
-                st.markdown(content)
-        
-        return super()._process_received_message(message, sender, silent)
+def safe_markdown(sender_name: str, content: str) -> None:
+    key = (sender_name, content.strip())
+
+    # if duplicate message, do not show it again
+    if key in st.session_state.shown:
+        return  
+
+    st.session_state.shown.add(key)
+    with st.chat_message(sender_name[0]):
+        st.markdown(content)
 
 
-class TrackableConversableAgent(ConversableAgent):
-    def _process_received_message(self, message, sender, silent):
-        # Extract actual message content
-        if isinstance(message, dict):
-            content = message.get("content", "")
-        else:
-            content = str(message)
-        
-        # Only display meaningful messages
-        if content and not content.startswith('{"content"'):
-            # Skip JSON responses and TERMINATE messages from display
-            if not (content.strip().startswith('{') and content.strip().endswith('}')) and "TERMINATE" not in content.upper():
-                with st.chat_message(self.name):
-                    st.markdown(content)
-        
-        return super()._process_received_message(message, sender, silent)
+class DisplayingAssistantAgent(AssistantAgent):
+    def send(self, *args, **kwargs):
+        msg = args[0] if args else kwargs.get("message")
+        content = (
+            msg.get("content") if isinstance(msg, dict)
+            else str(msg)
+        )
+        if content and not content.startswith("{"):
+            safe_markdown(self.name, content)
+        return super().send(*args, **kwargs)
+
+
+class DisplayingConversableAgent(ConversableAgent):
+    def send(self, *args, **kwargs):
+        msg = args[0] if args else kwargs.get("message")
+        content = (
+            msg.get("content") if isinstance(msg, dict)
+            else str(msg)
+        )
+        if content and not content.startswith("{"):
+            safe_markdown(self.name, content)
+        return super().send(*args, **kwargs)
+
+
+class DisplayingUserProxyAgent(UserProxyAgent):
+    def send(self, *args, **kwargs):
+        msg = args[0] if args else kwargs.get("message")
+        content = (
+            msg if isinstance(msg, str)
+            else msg.get("content", "")
+        )
+        if content:
+            safe_markdown("user", content)
+        return super().send(*args, **kwargs)
     
-
+    
 # Creating Agents for Event Planning Preferences
 def create_preference_agents():
-    preference_event_type_agent = TrackableConversableAgent(
+    preference_event_type_agent = DisplayingConversableAgent(
         name="Event_Type_Preference_Agent",
         system_message="""
         You are responsible for getting the event type from the user and normalizing it.
@@ -89,6 +91,8 @@ def create_preference_agents():
         - gym, fitness, workout, exercise → gym
         - bookstore, library, books → book_store
         - sports, stadium, arena, match → stadium
+
+        DO NOT repeat the question multiple times. Ask once and wait for response.
         
         When you have the mapping, respond with EXACTLY this format:
         {"event_type": "normalized_type"}
@@ -100,24 +104,33 @@ def create_preference_agents():
         human_input_mode='NEVER', 
     )
 
-    preference_event_participant_agent = TrackableConversableAgent(
+    preference_event_participant_agent = DisplayingConversableAgent(
         name="Event_Participant_Preference_Agent",
         system_message="""
-        You are an agent that gets the number of participants of the event that the user wants to plan.
-        The integer returned should be the number of participants.
-        Wait for the answer, then say "Thank you! I have the number of participants for the event."
-        Only speak when it's your turn to collect the number of participants that will attend the event.
-        Make sure to collect the number of participants in a single integer.
-        If the user does not provide a number, you can ask for more details.
-        Once you have parsed the event participants, respond only with a JSON object of the form {'participants': <number_of_participants>}.
-        Return 'TERMINATE' when you have gathered all the information you need.
+        You collect the number of participants for the event.
+
+        IMPORTANT: Your conversation flow should be:
+        1. Ask the user: "How many participants will be attending this event?"
+        2. Wait for the user's response.
+        3. Extract the integer count of participants from their reply.
+        4. If no integer is found, ask for clarification: 
+        "I didn't catch the number of participants. Could you please specify it as a single integer?"
+        5. Once you have the integer, respond with EXACTLY this format: {"participants": <number>}
+        6. Then say: TERMINATE
+
+        DO NOT repeat the question multiple times. Ask once and wait for response.
+
+        Example:
+        User: "There will be 8 people attending"
+        You: {"participants": 8}
+        TERMINATE
         """,
         llm_config=llm_config,
         code_execution_config=False,
         human_input_mode='NEVER',
     )
 
-    preference_event_budget_agent = TrackableConversableAgent(
+    preference_event_budget_agent = DisplayingConversableAgent(
         name="Event_Budget_Preference_Agent",
         system_message="""
         You collect the budget per person for the event.
@@ -125,8 +138,8 @@ def create_preference_agents():
         IMPORTANT: Your conversation flow should be:
         1. Ask "What is your budget per person for this event?"
         2. Wait for the user's response
-        3. Extract the budget amount
-        4. If they give total budget, divide by number of participants
+        3. Extract the budget amount per person
+        4. If user specifically provides a total budget, divide it by the number of participants to get the budget per person.
         5. Respond with EXACTLY this format: {"budget_per_person": amount}
         6. Then say: TERMINATE
         
@@ -143,15 +156,23 @@ def create_preference_agents():
         code_execution_config=False,
         human_input_mode='NEVER',
     )
-    preference_event_time_agent = TrackableConversableAgent(
+    preference_event_time_agent = DisplayingConversableAgent(
         name="Event_Time_Preference_Agent",
         system_message="""           
-            You are an agent that collects the date and time of the event the user wants to plan. 
-            When the user provides a date and time, check if it is in the format 'DD-MM-YYYY, HH:MM'. ,
-            If it is not, use the `parse_event_time` function to convert it into the correct format. 
-            Wait for the answer, then say 'Thank you! I have the date and time of the event.' 
-            Once you have parsed the event time, respond only with a JSON object of the form {'event_time': DD-MM-YYYY, HH:MM }.
-            
+        You collect the date and time string for the event exactly as the user provides it.
+
+        IMPORTANT: Your conversation flow should be:
+        1. Ask: "When is the event scheduled? Please provide date and time (e.g., '09-07-2025 18:30', 'tomorrow evening' or 'next week Wednesday 6 PM)."
+        2. Wait for the user's response.
+        3. Take the user’s response verbatim and store it without modification.
+        4. Respond with EXACTLY this JSON and nothing else:
+        {"event_time": "<user_input_string>"}
+        5. Then say: TERMINATE
+
+        Example:
+        User: "Next Friday at 8 pm"
+        You: {"event_time": "Next Friday at 8 pm"}
+        TERMINATE
         """,
         llm_config=llm_config,
         code_execution_config=False,
@@ -159,42 +180,57 @@ def create_preference_agents():
     )
     
 
-    preference_event_location_agent = TrackableConversableAgent(
+    preference_event_location_agent = DisplayingConversableAgent(
         name="Event_Location_Preference_Agent",
         system_message="""
-        You are an agent that gets the location of the event that the user wants to plan.
-        The user will provide a general location, such as a city or a street, or a specific location.
-        Wait for the answer, then say "Thank you! I have the location of the event."
-        Only speak when it's your turn to collect event location information.
-        Make sure to collect the event location in a single string that contains the address or the area of the event.
-        If the user provides a location that is not specific enough, you can ask for more details.
-        Once you have parsed the event location, respond only with a JSON object of the form {'location': '<event_location>'}.
-        Return 'TERMINATE' when you have gathered all the information you need.
+        You collect the event location exactly as the user says it.
+
+        IMPORTANT — conversation flow:
+        1. Ask: "Where will the event take place? Please provide a city or an area."
+        2. Wait for the user's reply.
+        3. Store the reply verbatim.
+        4. If the location is too vague, ask for clarification:
+        "Could you provide a more specific location?"
+        5. Once you have the location string, respond with EXACTLY this format:
+        {"location": "<user_input_string>"}
+        6. Then immediately say: TERMINATE
+
+        Example:
+        User: "Central Park, New York"
+        You: {"location": "Central Park, New York"}
+        TERMINATE
         """,
         llm_config=llm_config,
         code_execution_config=False,
         human_input_mode='NEVER',
     )
 
-    preference_event_request_agent = TrackableConversableAgent(
+    preference_event_request_agent = DisplayingConversableAgent(
         name="Event_Request_Preference_Agent",
         system_message="""
-        You are an agent that gets the user's special requests for the event they want to plan if they have any.
-        The user will provide a request, such as "vegan food" or "wheelchair accessibility".
-        If the user does not have any special requests, you can return 'TERMINATE'.
-        Wait for the answer, then say "Thank you! I have the special requests for the event."
-        Only speak when it's your turn to collect special requests for the event information.
-        Make sure to collect the special requests in a single string that contains the requests.
-        If the user provides a request that is not clear, you can ask for more details.
-        Once you have parsed the event requests, respond only with a JSON object of the form {'special_requests': '<requests>'}.
-        Return 'TERMINATE' when you have gathered all the information you need.
+        You collect any special requests for the event (e.g., dietary restrictions, wifi quality, quiet environment, seating preferences).
+
+        IMPORTANT: Your conversation flow should be:
+        1. Ask the user: "Do you have any special requests for this event?"
+        2. Wait for the user's response.
+        3. Normalize their response:
+        - Convert to lowercase
+        - Remove punctuation (except hyphens)
+        - Trim leading/trailing whitespace
+        - If multiple requests are comma-separated, keep them separated by spaces
+        - Ensure it’s a concise keyword or phrase suitable for a Google Places API keyword parameter
+        If the input is unclear or too long, ask: "Could you please rephrase as a short keyword or phrase (e.g., 'good wifi', 'quiet environment')?"
+        4. If they answer "no" or "none", treat special_requests as None.
+        5. Respond with EXACTLY this JSON:
+        {"special_requests": <normalized_string_or_null>}
+        6. Then immediately say: TERMINATE
         """,
         llm_config=llm_config,
         code_execution_config=False,
         human_input_mode='NEVER',
     )
 
-    preference_event_recommendation_agent = TrackableConversableAgent(
+    preference_event_recommendation_agent = DisplayingConversableAgent(
         name="Event_Recommendation_Agent",
         system_message="""
         You are an agent that recommends venues for the event based on the user's preferences.
@@ -220,7 +256,7 @@ def create_preference_agents():
         code_execution_config=False,
         human_input_mode='NEVER',
     )
-    preference_proxy_agent = TrackableUserProxyAgent(
+    preference_proxy_agent = DisplayingUserProxyAgent(
         name="Event_Preference_Proxy_Agent",
         llm_config=False,
         code_execution_config=False,
@@ -233,21 +269,21 @@ def create_preference_agents():
     preference_recommendation_executor = LocalCommandLineCodeExecutor(
         timeout=120,
         work_dir="coding",
-        functions=[geocode_address, search_nearby_venues, dietary_request, get_venues_by_budget, get_venues_by_budget_and_dietary],
+        functions=[geocode_address, search_nearby_venues, dietary_request, get_venues_by_budget, get_venues_by_budget_and_requests, get_event_day_and_time, get_venue_opening_hours, is_open],
     )
 
     # code executor
-    codeExecutor = TrackableAssistantAgent(
+    codeExecutor = DisplayingAssistantAgent (
         name="Code_Executor_Agent",
-        code_execution_config={"work_dir": "coding", "use_docker": False},
+        code_execution_config={"work_dir": "coding",
+                               "use_docker": False,},
         human_input_mode="NEVER",
     )
 
     # Code writer 
-    codeGenerator = TrackableAssistantAgent(
+    codeGenerator = DisplayingAssistantAgent    (
         name="Code_Generator_Agent",
-        system_message="""
-            You are a code generator. You will receive a JSON object with the user's preferences.
+        system_message="""You are a code generator. You will receive a JSON object with the user's preferences.
             Output **only** a runnable Python code snippet, fenced as ```python```, that:
 
             1. import sys, json
@@ -256,9 +292,11 @@ def create_preference_agents():
             3. from helperFunctions import (
                 geocode_address,
                 search_nearby_venues,
-                dietary_request,
                 get_venues_by_budget,
-                get_venues_by_budget_and_dietary
+                get_venues_by_budget_and_requests,
+                get_event_day_and_time,
+                get_venue_opening_hours,
+                is_open
             )
 
             4. Load the JSON payload into `prefs`, e.g.:
@@ -269,35 +307,29 @@ def create_preference_agents():
             event_type       = prefs.get('event_type')
             special_requests = prefs.get('special_requests')
             budget           = prefs.get('budget')
+            participants     = prefs.get('participants', 1)
+            date             = prefs.get('event_date')
             radius           = prefs.get('radius', 5000)
             max_results      = prefs.get('max_results', 5)
 
             6. Always geocode first:
             lat, lng = geocode_address(location)
 
-            7. Decide which helper to call based on presence of `budget` and `special_requests`:
-            - If both `budget` and `special_requests` are provided:
-                venues = get_venues_by_budget_and_dietary(
-                    lat=lat, lng=lng,
-                    radius=radius,
-                    place_type=event_type,
-                    keyword=event_type,
-                    budget_per_person=budget,
-                    dietary_keyword=special_requests,
-                    max_results=max_results
-                )
-            - Elif only `budget` is provided:
-                venues = get_venues_by_budget(
-                    lat=lat, lng=lng,
-                    radius=radius,
-                    place_type=event_type,
-                    keyword=event_type,
-                    budget_per_person=budget,
-                    max_results=max_results
-                )
+            7. Decide which helper to call based on `budget` and `special_requests`:
+            venues = get_venues_by_budget_and_requests(
+                lat=lat, lng=lng,
+                radius=radius,
+                place_type=event_type,
+                keyword=event_type,
+                budget_per_person=budget,
+                special_request=special_requests,
+                event_time=date,
+                max_results=max_results
+            )
 
             8. Print the results as JSON:
-            print(json.dumps(venues, ensure_ascii=False))
+            output = json.dumps(venues, ensure_ascii=False)
+            sys.stdout.buffer.write(output.encode("utf-8"))
 
             Do NOT add any prose or markdown outside the ```python``` block.
             """,
@@ -357,11 +389,32 @@ def create_preference_agents():
         description="Get venues by budget based on latitude, longitude, radius, place type, keyword, budget per person, and maximum results.",
     )
     register_function(
-        get_venues_by_budget_and_dietary,
+        get_venues_by_budget_and_requests,
         caller=codeGenerator,
         executor=preference_proxy_agent,
-        name="get_venues_by_budget_and_dietary",
+        name="get_venues_by_budget_and_requests",
         description="Get venues by budget and dietary requirements based on latitude, longitude, radius, place type, keyword, budget per person, dietary keyword, and maximum results.",
+    )
+    register_function(
+        get_event_day_and_time,
+        caller=codeGenerator,
+        executor=preference_proxy_agent,
+        name="get_event_day_and_time",
+        description="Get the event day and time based on the provided answer.",
+    )
+    register_function(
+        get_venue_opening_hours,
+        caller=codeGenerator,
+        executor=preference_proxy_agent,
+        name="get_venue_opening_hours",
+        description="Get the opening hours of a venue based on its latitude and longitude.",
+    )
+    register_function(
+        is_open,
+        caller=codeGenerator,
+        executor=preference_proxy_agent,
+        name="is_open",
+        description="Check if a venue is open based on its latitude, longitude, and event time.",
     )
 
     return preference_event_type_agent, preference_event_participant_agent, \
