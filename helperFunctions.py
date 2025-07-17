@@ -1,4 +1,8 @@
-import os, googlemaps, parsedatetime, datetime
+import os, googlemaps, parsedatetime, datetime, folium
+import pandas as pd
+import streamlit as st
+import pydeck as pdk
+from streamlit_folium import folium_static
 from dotenv import load_dotenv
 from collections import defaultdict
 
@@ -11,14 +15,21 @@ DIETARY_KEYWORDS = {
     "pescatarian": ["pescatarian", "seafood only", "fish only"],
 }
 
+PRICEABLE_TYPES = {
+    "restaurant", "cafe", "bar",
+    "meal_takeaway", "meal_delivery",
+    "night_club", "bakery"
+}
+
+
 WEEKDAY_TO_NUM = {
-    "Monday": 0,
-    "Tuesday": 1,
-    "Wednesday": 2,
-    "Thursday": 3,
-    "Friday": 4,
-    "Saturday": 5,
-    "Sunday": 6,
+    "Sunday": 0,
+    "Monday": 1,
+    "Tuesday": 2,
+    "Wednesday": 3,
+    "Thursday": 4,
+    "Friday": 5,
+    "Saturday": 6,
 }
 
 gmaps  = googlemaps.Client(key=os.environ.get("GOOGLEMAPS_API_KEY"))
@@ -125,7 +136,7 @@ def dietary_request(texts: list[str]) -> dict[str, int]:
 
 def get_venues_by_budget(lat: float,
                          lng: float,
-                         radius: int = 5_000,
+                         radius: int = 10_000,
                          place_type: str = None,
                          keyword: str = None,
                          budget_per_person: float = 0.0,  # in euros
@@ -146,7 +157,7 @@ def get_venues_by_budget(lat: float,
         lng (float):
             Longitude of the search center.
         radius (int, optional):
-            Search radius in meters. Defaults to 5_000.
+            Search radius in meters. Defaults to 10_000.
         place_type (str, optional):
             One of Google Places’ supported `type` filters (e.g. "restaurant", "cafe").
             Defaults to None (no type filter).
@@ -199,6 +210,9 @@ def get_venues_by_budget(lat: float,
     # drop  None values
     params = {k: v for k, v in params.items() if v is not None}
 
+    if place_type not in PRICEABLE_TYPES:
+        params.pop("max_price", None)  
+
     response = gmaps.places_nearby(**params)
     results = response.get("results", [])
 
@@ -207,7 +221,7 @@ def get_venues_by_budget(lat: float,
 
 def get_venues_by_budget_and_requests(lat: float,
                                      lng: float,
-                                     radius: int = 5_000,
+                                     radius: int = 10_000,
                                      place_type: str = None,
                                      keyword: str = None,
                                      budget_per_person: float = 0.0,
@@ -274,59 +288,101 @@ def get_venues_by_budget_and_requests(lat: float,
     • `ValueError`   – if `event_time` cannot be parsed.  
     • `googlemaps.exceptions.ApiError`   – propagated from any Places API call.
     """
-    day_name, time = get_event_day_and_time(event_time) 
-    day = WEEKDAY_TO_NUM[day_name]
+    day = None
+    time = None
+    if event_time:
+        try:
+            day_name, time = get_event_day_and_time(event_time) 
+            day = WEEKDAY_TO_NUM.get(day_name)
+        except Exception as e:
+            print(f"Error parsing event time: {e}")
+            event_time = None
 
+    # Combine keyword and special_request for the initial search
     combined_keyword = " ".join(filter(None, [keyword, special_request]))
     
-    # filter venues by budget
+    # Filter venues by budget first
     venues = get_venues_by_budget(
         lat=lat, lng=lng,
         radius=radius,
         place_type=place_type,
         keyword=combined_keyword or None,
         budget_per_person=budget_per_person,
-        max_results=max_results
+        max_results=max_results * 2  # Get more initially to account for filtering
     )
 
-    # filter venues by opening hours
-    if event_time:
+    # Filter venues by opening hours if event_time is provided
+    if event_time and day is not None and time is not None:
         still_open = []
         for v in venues:
-            details = gmaps.place(
-                place_id=v["place_id"],
-                fields=["opening_hours"],
-            )
-            periods = (
-                details["result"]
-                .get("opening_hours", {})
-                .get("periods", [])
-            )
-            if periods and is_open(periods, day, time):
+            try:
+                details = gmaps.place(
+                    place_id=v["place_id"],
+                    fields=["opening_hours"],
+                )
+                periods = (
+                    details["result"]
+                    .get("opening_hours", {})
+                    .get("periods", [])
+                )
+                if periods and is_open(periods, day, time):
+                    still_open.append(v)
+                elif not periods:
+                    # If no opening hours info, include the venue (assume always open)
+                    still_open.append(v)
+            except Exception as e:
+                print(f"Error checking opening hours for venue: {e}")
+                # Include venue if we can't check hours
                 still_open.append(v)
         venues = still_open
-    
-    # # filter venues by dietary keyword if provided
-    #     if special_request:
-    #         req_lower = special_request.lower()
-    #         filtered = []
-    #         for v in venues:
-    #             # fetch up to the first 5 reviews
-    #             details = gmaps.place(
-    #                 place_id=v["place_id"],
-    #                 fields=["reviews"]
-    #             )
-    #             reviews = [r["text"].lower() for r in details["result"].get("reviews", [])]
-    #             # count occurrences of the exact request phrase
-    #             match_count = sum(review.count(req_lower) for review in reviews)
-    #             if match_count > 0:
-    #                 # annotate how often we saw it
-    #                 v["request_matches"] = match_count
-    #                 filtered.append(v)
-    #         return filtered
 
-    # if no special_request, just return the budget (and hours) filtered list
-    return venues
+    # Optional: Enhanced special request filtering through reviews
+    # This is more thorough but uses more API calls
+    if special_request and len(special_request.strip()) > 0:
+        try:
+            req_lower = special_request.lower()
+            enhanced_venues = []
+            
+            for v in venues:
+                # Start with a base score for venues that matched the keyword search
+                venue_score = 1
+                
+                try:
+                    # Fetch reviews to check for special request mentions
+                    details = gmaps.place(
+                        place_id=v["place_id"],
+                        fields=["reviews"]
+                    )
+                    reviews = details["result"].get("reviews", [])
+                    
+                    if reviews:
+                        review_texts = [r.get("text", "").lower() for r in reviews]
+                        match_count = sum(review.count(req_lower) for review in review_texts)
+                        
+                        if match_count > 0:
+                            # Boost score for venues mentioned in reviews
+                            venue_score += match_count
+                            v["request_matches"] = match_count
+                    
+                    # Include venue with its score
+                    v["relevance_score"] = venue_score
+                    enhanced_venues.append(v)
+                    
+                except Exception as e:
+                    print(f"Error checking reviews for venue {v.get('name', 'Unknown')}: {e}")
+                    # Include venue even if review check fails
+                    v["relevance_score"] = venue_score
+                    enhanced_venues.append(v)
+            
+            # Sort by relevance score (higher is better)
+            venues = sorted(enhanced_venues, key=lambda x: x.get("relevance_score", 0), reverse=True)
+            
+        except Exception as e:
+            print(f"Error in special request filtering: {e}")
+            # If special request filtering fails, continue with existing venues
+
+    # Return the top results
+    return venues[:max_results]
     
 
 def get_event_day_and_time(event_date: str) -> tuple[str, str]:
@@ -412,37 +468,121 @@ def is_open(periods: list[dict], day: int, time: str) -> bool:
     t_user = int(time)
 
     for p in periods:
-        o_day, o_time = p["open"]["day"],  int(p["open"]["time"])
-        c_day, c_time = p["close"]["day"], int(p["close"]["time"])
+        o = p.get("open")
+        if not o:
+            continue
+        o_day, o_time = o["day"], int(o["time"])
 
-        if o_day == c_day:                       # normal same-day period
+        c = p.get("close")
+        if c:
+            c_day, c_time = c["day"], int(c["time"])
+        else:
+            # no explicit close → assume closes same day at 23:59
+            c_day, c_time = o_day, 2359
+
+        # same‐day period
+        if o_day == c_day:
             if day == o_day and o_time <= t_user < c_time:
                 return True
-        else:                                    # crosses midnight
-            # part A: open-day slice (e.g. Fri 11:30-24:00)
+        else:
+            # overnight period
+            # part A: before midnight slice
             if day == o_day and t_user >= o_time:
                 return True
-            # part B: after-midnight slice (e.g. Sat 00:00-01:00)
+            # part B: after‐midnight slice
             if day == c_day and t_user < c_time:
                 return True
 
     return False
 
 
+
+def create_venue_map(venues):
+    # Skip if no venues
+    if not venues:
+        return
+    
+    # Get coordinates of first venue to center the map
+    # If no venue with geometry exists, use a default location
+    center_lat, center_lng = None, None
+    for venue in venues:
+        if "geometry" in venue and "location" in venue["geometry"]:
+            center_lat = venue["geometry"]["location"]["lat"]
+            center_lng = venue["geometry"]["location"]["lng"]
+            break
+    
+    # If no valid venue was found, return
+    if center_lat is None or center_lng is None:
+        st.error("No valid venue coordinates found")
+        return
+        
+    # Create a single map centered at the first venue
+    m = folium.Map(location=[center_lat, center_lng], zoom_start=13)
+    
+    # Add all venues as markers to this map
+    for venue in venues:
+        if "geometry" not in venue or "location" not in venue["geometry"]:
+            continue
+        
+        lat = venue["geometry"]["location"]["lat"]
+        lng = venue["geometry"]["location"]["lng"]
+        name = venue["name"]
+        
+        # Get additional venue details for the popup if available
+        address = venue.get("vicinity", "Address not available")
+        rating = venue.get("rating", "No rating")
+        
+        # Create a more informative popup
+        popup_html = f"""
+        <div style="width:200px;border-radius:25px;">
+            <h4>{name}</h4>
+            <p><b>Address:</b> {address}</p>
+            <p><b>Rating:</b> {rating}/5</p>
+        </div>
+        """
+        
+        # Add marker with popup/tooltip
+        folium.Marker(
+            location=[lat, lng],
+            tooltip=popup_html,
+            icon=folium.Icon(color='red')
+        ).add_to(m)
+    
+    # If we have multiple venues, fit the bounds of the map to show all markers
+    if len(venues) > 1:
+        # Get all coordinates
+        coordinates = []
+        for venue in venues:
+            if "geometry" in venue and "location" in venue["geometry"]:
+                lat = venue["geometry"]["location"]["lat"]
+                lng = venue["geometry"]["location"]["lng"]
+                coordinates.append([lat, lng])
+        
+        if coordinates:
+            m.fit_bounds(coordinates)
+    
+    # Display the map in Streamlit
+    folium_static(m, width=700, height=500)
+
+
 if __name__ == "__main__":
-    location = "Amsterdam, Netherlands"
+    location = "Nicosia, Cyprus"
     loc = geocode_address(location)
 
     venues = get_venues_by_budget_and_requests(
         lat=loc[0],
         lng=loc[1],
-        radius=10000,
-        place_type="restaurant",
-        keyword="good wifi",
-        budget_per_person=80,
+        radius=5000,
+        place_type="cafe",
+        keyword="cafe",
+        budget_per_person=20,
         event_time="tomorrow evening",
         max_results=5
     )
-    print(venues)
+    
+    create_venue_map(venues)  
+    # x = geocode_address("Eindhoven, Netherlands")
+    # df = pd.DataFrame([x], columns=["lat", "lon"])
 
+    # st.map(df, color="#ff0000", zoom=12, use_container_width=True)
 

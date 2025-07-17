@@ -75,12 +75,12 @@ def create_preference_agents():
         You are responsible for getting the event type from the user and normalizing it.
         
         IMPORTANT: Your conversation flow should be:
-        1. Ask the user what type of event they want to plan
+        1. Ask the user: "What is the event that you want to plan? (e.g., dinner, drinks, museum visit, etc.)"
         2. Take their answer and map it to a Google Places API type
         3. Respond ONLY with the JSON format specified below
         4. Then say TERMINATE
         
-        Mapping rules:
+        Mapping rules:  
         - dinner, lunch, brunch, meal, food, banquet, dinner party → restaurant
         - drinks, cocktails, happy hour, night out → bar  
         - coffee, café, tea, coffee shop → cafe
@@ -136,20 +136,30 @@ def create_preference_agents():
         You collect the budget per person for the event.
         
         IMPORTANT: Your conversation flow should be:
-        1. Ask "What is your budget per person for this event?"
+        1. Ask "What is your budget per person in euros for this event?"
         2. Wait for the user's response
-        3. Extract the budget amount per person
-        4. If user specifically provides a total budget, divide it by the number of participants to get the budget per person.
-        5. Respond with EXACTLY this format: {"budget_per_person": amount}
-        6. Then say: TERMINATE
+        3. Extract the budget amount per person based on these rules:
+        - If user provides a specific amount per person, use that amount
+        - If user provides a total budget, divide it by the number of participants to get budget per person
+        - If user says "no budget", "unlimited", "no limit", "doesn't matter", or similar phrases indicating no budget constraint, set budget_per_person to 1000 (this ensures all venues are considered regardless of price level)
+        4. Respond with EXACTLY this format: {"budget_per_person": amount}
+        5. Then say: TERMINATE
         
-        Example:
+        Examples:
         User: "50 euros per person"
         You: {"budget_per_person": 50}
         TERMINATE
         
         User: "200 euros total" (and you know there are 4 participants)
         You: {"budget_per_person": 50}
+        TERMINATE
+        
+        User: "No budget" or "unlimited" or "doesn't matter"
+        You: {"budget_per_person": 1000}
+        TERMINATE
+        
+        User: "I don't have a specific budget in mind"
+        You: {"budget_per_person": 1000}
         TERMINATE
         """,
         llm_config=llm_config,
@@ -164,14 +174,29 @@ def create_preference_agents():
         IMPORTANT: Your conversation flow should be:
         1. Ask: "When is the event scheduled? Please provide date and time (e.g., '09-07-2025 18:30', 'tomorrow evening' or 'next week Wednesday 6 PM)."
         2. Wait for the user's response.
-        3. Take the user’s response verbatim and store it without modification.
+        3. Handle the response based on these rules:
+        - If user provides a specific date/time, store it verbatim without modification
+        - If user says "no specific time", "anytime", "flexible", "doesn't matter", "no preference", or similar phrases indicating no time constraint, set event_time to null
+        - If user says they don't know or haven't decided yet, set event_time to null
         4. Respond with EXACTLY this JSON and nothing else:
-        {"event_time": "<user_input_string>"}
+        {"event_time": "<user_input_string>"} OR {"event_time": null}
         5. Then say: TERMINATE
 
-        Example:
+        Examples:
         User: "Next Friday at 8 pm"
         You: {"event_time": "Next Friday at 8 pm"}
+        TERMINATE
+        
+        User: "Tomorrow evening"
+        You: {"event_time": "Tomorrow evening"}
+        TERMINATE
+        
+        User: "No specific time" or "anytime" or "flexible"
+        You: {"event_time": null}
+        TERMINATE
+        
+        User: "I don't know yet" or "haven't decided"
+        You: {"event_time": null}
         TERMINATE
         """,
         llm_config=llm_config,
@@ -208,10 +233,10 @@ def create_preference_agents():
     preference_event_request_agent = DisplayingConversableAgent(
         name="Event_Request_Preference_Agent",
         system_message="""
-        You collect any special requests for the event (e.g., dietary restrictions, wifi quality, quiet environment, seating preferences).
+        You collect any special requests for the event (e.g., dietary restrictions, wifi quality, quiet environment).
 
         IMPORTANT: Your conversation flow should be:
-        1. Ask the user: "Do you have any special requests for this event?"
+        1. Ask the user: "Do you have any further requests for this event? For example, dietary preferences, wifi quality, quiet environment, etc. Please provide them as a short keyword or phrase."
         2. Wait for the user's response.
         3. Normalize their response:
         - Convert to lowercase
@@ -233,24 +258,42 @@ def create_preference_agents():
     preference_event_recommendation_agent = DisplayingConversableAgent(
         name="Event_Recommendation_Agent",
         system_message="""
-        You are an agent that recommends venues for the event based on the user's preferences.
-        You will receive a JSON object with the venues found according to the users's preferences.
-        Put the venues in a markdown format such as:
+        You handle venue recommendations and fallback modifications.
+        
+        CASE 1 - Normal Recommendations:
+        If you receive venue data (non-empty list), format it as:
         ```markdown
         - 1. [Venue Name]:
-          Address: [Venue Address]
-            Rating: [Venue Rating]/5
-            Description: [Venue Description]
-        - 2. [Venue Name]:
             Address: [Venue Address]
             Rating: [Venue Rating]/5
             Description: [Venue Description]
         ```
-        Provide the user with 5 venues that match their preferences.
-        If there are no venues that match the user's preferences, you can say "No venues found that match your preferences."
-        If the user has special requests, make sure to make recommendations based on those requests.
-        If the user does not have any special requests, you can recommend venues based on the event
-        Return 'TERMINATE' when you have gathered all the information you need.
+        Provide up to 5 venues and then say TERMINATE.
+        
+        CASE 2 - Initial Fallback Choice Handling:
+        If you receive a user's fallback choice number (1, 2, 3, 4, or 5), respond as follows:
+        
+        Choice 1: Ask "How much larger should I search? Please specify (e.g., 'double the area', '20km radius', 'triple the search area'):" and STOP. Do NOT provide JSON yet.
+        
+        Choice 2: Ask "Which nearby location would you like me to search instead? Please provide a city or area name:" and STOP. Do NOT provide JSON yet.
+        
+        Choice 3: Ask "What's your new budget per person? Please specify the amount:" and STOP. Do NOT provide JSON yet.
+        
+        Choice 4: Immediately respond with: {"fallback": "remove_requests", "new_special_requests": null} and say TERMINATE.
+        
+        Choice 5: Ask "What type of event would you like to try instead? (e.g., bar, cafe, museum, etc.):" and STOP. Do NOT provide JSON yet.
+        
+        CASE 3 - Processing User's Detailed Response:
+        If you receive a user's detailed response to your question (like "Amsterdam" or "double the area"), then create the appropriate JSON:
+        
+        For location responses: {"fallback": "change_location", "new_location": "<user_input>"}
+        For radius responses: {"fallback": "expand_radius", "new_radius": <calculated_meters>}
+        For budget responses: {"fallback": "increase_budget", "new_budget_per_person": <amount>}
+        For event type responses: {"fallback": "change_event_type", "new_event_type": "<normalized_type>"}
+        
+        Then say TERMINATE.
+        
+        CRITICAL RULE: Never provide JSON immediately after a choice number (1-5). Always ask the question first and wait for the user's specific answer.
         """,
         llm_config=llm_config,
         code_execution_config=False,
@@ -277,62 +320,123 @@ def create_preference_agents():
         name="Code_Executor_Agent",
         code_execution_config={"work_dir": "coding",
                                "use_docker": False,},
+        system_message="""You execute Python code and handle results.
+        
+        After executing code:
+        1. If the output shows venues (non-empty list), proceed normally
+        2. If the output is "[]" or shows no venues, respond with:
+        "No venues found with the current preferences. Let me offer some alternatives."
+        Then immediately suggest:
+        
+        "Would you like me to try one of these options?
+        1. Search in a larger area
+        2. Search in a different nearby location  
+        3. Increase your budget range
+        4. Remove special requests
+        5. Try a different event type
+        
+        Please tell me which option you'd prefer (1-5)."
+        
+        Always handle Unicode/encoding errors gracefully and provide informative output.
+        """,
         human_input_mode="NEVER",
     )
 
     # Code writer 
     codeGenerator = DisplayingAssistantAgent    (
         name="Code_Generator_Agent",
-        system_message="""You are a code generator. You will receive a JSON object with the user's preferences.
-            Output **only** a runnable Python code snippet, fenced as ```python```, that:
-
-            1. import sys, json
-            2. add the project path:
-            sys.path.insert(0, r'C:\\Users\\20231455\\OneDrive - TU Eindhoven\\Desktop\\AI Agents\\EventPlannerAI')
-            3. from helperFunctions import (
-                geocode_address,
-                search_nearby_venues,
-                get_venues_by_budget,
-                get_venues_by_budget_and_requests,
-                get_event_day_and_time,
-                get_venue_opening_hours,
-                is_open
-            )
-
-            4. Load the JSON payload into `prefs`, e.g.:
-            prefs = json.loads(input_json_string)
-
-            5. Pull out all possible settings with safe defaults:
-            location         = prefs.get('location')
-            event_type       = prefs.get('event_type')
-            special_requests = prefs.get('special_requests')
-            budget           = prefs.get('budget')
-            participants     = prefs.get('participants', 1)
-            date             = prefs.get('event_date')
-            radius           = prefs.get('radius', 5000)
-            max_results      = prefs.get('max_results', 5)
-
-            6. Always geocode first:
+        system_message="""You generate Python code for venue searches.
+            
+        You will receive either:
+        A) Initial user preferences JSON, OR
+        B) A fallback modification JSON that modifies the original search
+        
+        For INITIAL SEARCH - generate standard search code using the collected preferences.
+        
+        For FALLBACK SEARCH - you will receive a JSON like:
+        {"fallback": "expand_radius", "new_radius": 10000}
+        {"fallback": "change_location", "new_location": "Amsterdam"}
+        {"fallback": "increase_budget", "new_budget_per_person": 100}
+        {"fallback": "remove_requests", "new_special_requests": null}
+        {"fallback": "change_event_type", "new_event_type": "bar"}
+        {"fallback": "change_event_time", "new_event_time": "next Friday evening"}
+        
+        For fallback searches, modify the original preferences accordingly and generate the same code structure.
+        
+        Generate this code structure:
+        ```python
+        import sys, json
+        
+        if sys.platform == "win32":
+            try:
+                sys.stdout.reconfigure(encoding='utf-8')
+            except: pass
+        
+        sys.path.insert(0, r'C:\\Users\\20231455\\OneDrive - TU Eindhoven\\Desktop\\AI Agents\\EventPlannerAI')
+        
+        from helperFunctions import geocode_address, get_venues_by_budget_and_requests
+        
+        # Original preferences (use the previously collected values)
+        prefs = {{
+            "event_type": "restaurant",  # or whatever was collected
+            "participants": 5,           # or whatever was collected
+            "budget_per_person": 1000,   # or whatever was collected
+            "event_time": "tomorrow evening",  # or whatever was collected
+            "location": "Prague",        # or whatever was collected
+            "special_requests": null     # or whatever was collected
+        }}
+        
+        # Apply fallback modifications if provided
+        # [Apply the specific modification based on fallback type - you must implement this logic]
+        
+        location = prefs.get('location')
+        event_type = prefs.get('event_type')
+        special_requests = prefs.get('special_requests')
+        budget = prefs.get('budget_per_person', 1000)
+        participants = prefs.get('participants', 1)
+        date = prefs.get('event_time')
+        radius = prefs.get('radius', 10000)  # Default to 10km for better results
+        max_results = prefs.get('max_results', 5)
+        
+        try:
             lat, lng = geocode_address(location)
-
-            7. Decide which helper to call based on `budget` and `special_requests`:
             venues = get_venues_by_budget_and_requests(
-                lat=lat, lng=lng,
-                radius=radius,
-                place_type=event_type,
-                keyword=event_type,
-                budget_per_person=budget,
-                special_request=special_requests,
-                event_time=date,
-                max_results=max_results
+                lat=lat, lng=lng, radius=radius, place_type=event_type,
+                keyword=event_type, budget_per_person=budget,
+                special_request=special_requests, event_time=date, max_results=max_results
             )
-
-            8. Print the results as JSON:
-            output = json.dumps(venues, ensure_ascii=False)
-            sys.stdout.buffer.write(output.encode("utf-8"))
-
-            Do NOT add any prose or markdown outside the ```python``` block.
-            """,
+            
+            if venues:
+                clean_venues = []
+                for venue in venues:
+                    clean_venue = {{}}
+                    for key, value in venue.items():
+                        if isinstance(value, str):
+                            clean_value = value.encode('ascii', 'ignore').decode('ascii')
+                            clean_venue[key] = clean_value
+                        else:
+                            clean_venue[key] = value
+                    clean_venues.append(clean_venue)
+                output = json.dumps(clean_venues, ensure_ascii=True, indent=2)
+                print(output)
+            else:
+                print("[]")
+        except Exception as e:
+            print(f"Error: {{str(e)}}")
+            print("[]")
+        ```
+        
+        IMPORTANT: 
+        - For expand_radius: multiply the radius or set to the new_radius value
+        - For change_location: replace the location with new_location
+        - For increase_budget: replace budget_per_person with new_budget_per_person
+        - For remove_requests: set special_requests to null
+        - For change_event_type: replace event_type with new_event_type
+        - For change_event_time: replace event_time with new_event_time
+        
+        You must implement the fallback modification logic in the code you generate. When you receive a fallback JSON, apply the changes to the prefs dictionary before using the values.
+        
+        Only output the ```python``` code block, nothing else.""",
         llm_config=llm_config,
         code_execution_config=False,
         human_input_mode="NEVER",
