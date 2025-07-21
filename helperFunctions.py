@@ -229,64 +229,65 @@ def get_venues_by_budget_and_requests(lat: float,
                                      event_time: str = None,
                                      max_results: int = 5) -> list[dict]:
     """
-    Return nearby venues that satisfy **all** of the following, in order:
+    Search for nearby venues that satisfy budget, opening-hours, and special-request constraints.
 
-    1. **Budget** – the place’s Google `price_level` (0–4) must match the
-       `budget_per_person` bracket (see mapping below).
-    2. **Opening hours** – if `event_time` is supplied, the venue must be
-       open at that exact day & time (fuzzy phrases like “tomorrow 18:30”
-       are accepted via `get_event_day_and_time`).
-    3. **Dietary tag** – if `dietary_keyword` is supplied, at least one user
-       review must contain that keyword (case-insensitive).  A per-venue
-       ``dietary_tags`` dict is added with hit counts for all tags.
+    This function performs a three-stage filter on Google Places results:
 
-    The search is performed in three passes:
-    * *Nearby Search* → budget filter  
-      (delegates to `get_venues_by_budget`, cap =`max_results`).
-    * *Place Details* → opening-hours filter (`is_open` helper).  
-      Skipped if `event_time` is ``None``.
-    * *Place Details* → review / dietary filter (`dietary_request`).  
-      Skipped if `dietary_keyword` is ``None``.
+    1. **Budget Filter**  
+       Uses a Nearby Search to retrieve up to `max_results * 2` places whose
+       Google `price_level` maps to your `budget_per_person` bracket:
+           - ≤ €0 ⇒ 0
+           - €1–10 ⇒ 1
+           - €11–30 ⇒ 2
+           - €31–60 ⇒ 3
+           - ≥ €61 ⇒ 4
 
-    ----------
+    2. **Opening-Hours Filter** (optional)  
+       If `event_time` is provided, parses it into a weekday and 24-hour time,
+       then retains only venues open at that specific slot. Venues without any
+       hours data are assumed “always open.”
+
+    3. **Special-Request Filter** (optional)  
+       If `special_request` is provided, fetches up to 5 recent reviews per venue,
+       counts mentions of the request keyword (case-insensitive), and assigns each
+       venue a `relevance_score = 1 + match_count`. Venues are then sorted by score.
+
     Parameters
     ----------
-    lat, lng : float  
-        Latitude / longitude of the search center.
-    radius : int, default **5000**  
-        Search radius in metres.
-    place_type : str | None  
-        Google Places “type” filter (e.g. ``"restaurant"``).
-    keyword : str | None  
-        Additional free-text keyword to refine the Nearby Search.
-    budget_per_person : float  
-        Maximum spend **per person in euros**.  Mapped to
-        ``price_level`` as:  
-        ``≤ 0 € → 0``, ``1–10 € → 1``, ``11–30 € → 2``,
-        ``31–60 € → 3``, ``≥ 61 € → 4``.
-    dietary_keyword : str | None  
-        Dietary tag to look for in reviews (e.g. ``"vegan"``, ``"halal"``).
-    event_time : str | None  
-        Desired date/time the event will take place  
-        (e.g. ``"tomorrow evening"``, ``"09-07-2025 18:00"``).  
-        If omitted, no opening-hours check is applied.
-    max_results : int, default **5**  
-        Maximum number of venues returned *after* all filters.
+    lat : float
+        Latitude of search center.
+    lng : float
+        Longitude of search center.
+    radius : int, default 10000
+        Search radius in meters.
+    place_type : str | None
+        Google Places “type” (e.g. "restaurant") or None for no type filter.
+    keyword : str | None
+        Free-text keyword to refine the Nearby Search.
+    budget_per_person : float, default 0.0
+        Maximum spend per person in euros; mapped to Google `price_level`.
+    special_request : str | None
+        Extra requirement (e.g. “vegan menu”); triggers review-based scoring.
+    event_time : str | None
+        Desired date/time (e.g. "tomorrow evening" or "09-07-2025 18:00").
+        If provided, only venues open at that slot are returned.
+    max_results : int, default 5
+        Maximum number of venues returned after all filters.
 
-    ----------
     Returns
-    ----------
-    list[dict]  
-        Google place dictionaries that meet every active constraint.
-        If a diet filter is applied, each dict also contains:
-
-        ``"dietary_tags" : dict[str, int]`` – keyword hit counts across reviews.
-
-    ----------
+    -------
+    list of dict
+        Up to `max_results` Google Place dicts matching all active filters.
+        If `special_request` is used, each dict includes:
+          - "request_matches": int, count of review hits
+          - "relevance_score": int, base score (+ hits)
+    
     Raises
-    ----------
-    • `ValueError`   – if `event_time` cannot be parsed.  
-    • `googlemaps.exceptions.ApiError`   – propagated from any Places API call.
+    ------
+    ValueError
+        If `event_time` cannot be parsed by `get_event_day_and_time`.
+    googlemaps.exceptions.ApiError
+        If any Places API call fails.
     """
     day = None
     time = None
@@ -308,7 +309,7 @@ def get_venues_by_budget_and_requests(lat: float,
         place_type=place_type,
         keyword=combined_keyword or None,
         budget_per_person=budget_per_person,
-        max_results=max_results * 2  # Get more initially to account for filtering
+        max_results=max_results * 2  
     )
 
     # Filter venues by opening hours if event_time is provided
@@ -328,7 +329,7 @@ def get_venues_by_budget_and_requests(lat: float,
                 if periods and is_open(periods, day, time):
                     still_open.append(v)
                 elif not periods:
-                    # If no opening hours info, include the venue (assume always open)
+                    # If no opening hours info,assume always open
                     still_open.append(v)
             except Exception as e:
                 print(f"Error checking opening hours for venue: {e}")
@@ -336,7 +337,6 @@ def get_venues_by_budget_and_requests(lat: float,
                 still_open.append(v)
         venues = still_open
 
-    # Optional: Enhanced special request filtering through reviews
     # This is more thorough but uses more API calls
     if special_request and len(special_request.strip()) > 0:
         try:
@@ -532,19 +532,36 @@ def create_venue_map(venues):
         address = venue.get("vicinity", "Address not available")
         rating = venue.get("rating", "No rating")
         
+         # Create Google Maps link
+        place_id = venue.get("place_id", "")
+        if place_id:
+            google_maps_url = f"https://www.google.com/maps/place/?q=place_id:{place_id}"
+        else:
+            # Fallback to coordinates if place_id not available
+            google_maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+        
+
         # Create a more informative popup
         popup_html = f"""
         <div style="width:200px;border-radius:25px;">
             <h4>{name}</h4>
             <p><b>Address:</b> {address}</p>
             <p><b>Rating:</b> {rating}/5</p>
+            <p><a href="{google_maps_url}" target="_blank">View on Google Maps</a></p>
         </div>
+        """
+
+        tooltip_html = f"""
+        <div style="width:100%;font-size:16px">
+            <strong>{name}</strong>
         """
         
         # Add marker with popup/tooltip
         folium.Marker(
             location=[lat, lng],
-            tooltip=popup_html,
+            tooltip=tooltip_html,
+            popup=folium.Popup(popup_html, max_width=300),
+            
             icon=folium.Icon(color='red')
         ).add_to(m)
     
@@ -579,8 +596,8 @@ if __name__ == "__main__":
         event_time="tomorrow evening",
         max_results=5
     )
-    
-    create_venue_map(venues)  
+
+    create_venue_map(venues)
     # x = geocode_address("Eindhoven, Netherlands")
     # df = pd.DataFrame([x], columns=["lat", "lon"])
 

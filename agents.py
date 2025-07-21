@@ -75,7 +75,7 @@ def create_preference_agents():
         You are responsible for getting the event type from the user and normalizing it.
         
         IMPORTANT: Your conversation flow should be:
-        1. Ask the user: "What is the event that you want to plan? (e.g., dinner, drinks, museum visit, etc.)"
+        1. Ask the user: "Hi! I'm here to help you plan the perfect event. What type of event are you thinking about? (e.g., dinner party, drinks with friends, coffee meetup, museum visit, etc.)"
         2. Take their answer and map it to a Google Places API type
         3. Respond ONLY with the JSON format specified below
         4. Then say TERMINATE
@@ -110,7 +110,7 @@ def create_preference_agents():
         You collect the number of participants for the event.
 
         IMPORTANT: Your conversation flow should be:
-        1. Ask the user: "How many participants will be attending this event?"
+        1. Ask the user: "Great choice! How many people will be joining you for this event?"
         2. Wait for the user's response.
         3. Extract the integer count of participants from their reply.
         4. If no integer is found, ask for clarification: 
@@ -136,7 +136,7 @@ def create_preference_agents():
         You collect the budget per person for the event.
         
         IMPORTANT: Your conversation flow should be:
-        1. Ask "What is your budget per person in euros for this event?"
+        1. Ask "Perfect! What's your budget per person in euros? (Feel free to say 'no budget' if you're flexible on price)"
         2. Wait for the user's response
         3. Extract the budget amount per person based on these rules:
         - If user provides a specific amount per person, use that amount
@@ -172,7 +172,7 @@ def create_preference_agents():
         You collect the date and time string for the event exactly as the user provides it.
 
         IMPORTANT: Your conversation flow should be:
-        1. Ask: "When is the event scheduled? Please provide date and time (e.g., '09-07-2025 18:30', 'tomorrow evening' or 'next week Wednesday 6 PM)."
+        1. Ask: "When would you like to have this event? You can tell me a specific date and time (like 'July 9th at 6:30 PM') or something general (like 'next Friday evening' or 'tomorrow morning')"
         2. Wait for the user's response.
         3. Handle the response based on these rules:
         - If user provides a specific date/time, store it verbatim without modification
@@ -211,7 +211,7 @@ def create_preference_agents():
         You collect the event location exactly as the user says it.
 
         IMPORTANT — conversation flow:
-        1. Ask: "Where will the event take place? Please provide a city or an area."
+        1. Ask: "Where would you like to host this event? Please share a city, neighborhood, or specific area you have in mind."
         2. Wait for the user's reply.
         3. Store the reply verbatim.
         4. If the location is too vague, ask for clarification:
@@ -236,7 +236,7 @@ def create_preference_agents():
         You collect any special requests for the event (e.g., dietary restrictions, wifi quality, quiet environment).
 
         IMPORTANT: Your conversation flow should be:
-        1. Ask the user: "Do you have any further requests for this event? For example, dietary preferences, wifi quality, quiet environment, etc. Please provide them as a short keyword or phrase."
+        1. Ask the user: "Almost done! Do you have any special requirements or preferences? (e.g., type of food if you are planning a dinner, or a quite place if you are searching for a cafe). If not, just say 'no'."
         2. Wait for the user's response.
         3. Normalize their response:
         - Convert to lowercase
@@ -263,10 +263,11 @@ def create_preference_agents():
         CASE 1 - Normal Recommendations:
         If you receive venue data (non-empty list), format it as:
         ```markdown
-        - 1. [Venue Name]:
-            Address: [Venue Address]
-            Rating: [Venue Rating]/5
-            Description: [Venue Description]
+        - ### 1. [Venue Name]: 
+            **Address:** [Venue Address] 
+            **Rating:** [Venue Rating]/5 
+            **Description:** [Venue Description] \newline
+            [Google Maps Link] 
         ```
         Provide up to 5 venues and then say TERMINATE.
         
@@ -398,31 +399,27 @@ def create_preference_agents():
         radius = prefs.get('radius', 10000)  # Default to 10km for better results
         max_results = prefs.get('max_results', 5)
         
-        try:
-            lat, lng = geocode_address(location)
-            venues = get_venues_by_budget_and_requests(
-                lat=lat, lng=lng, radius=radius, place_type=event_type,
-                keyword=event_type, budget_per_person=budget,
-                special_request=special_requests, event_time=date, max_results=max_results
-            )
-            
-            if venues:
-                clean_venues = []
-                for venue in venues:
-                    clean_venue = {{}}
-                    for key, value in venue.items():
-                        if isinstance(value, str):
-                            clean_value = value.encode('ascii', 'ignore').decode('ascii')
-                            clean_venue[key] = clean_value
-                        else:
-                            clean_venue[key] = value
-                    clean_venues.append(clean_venue)
-                output = json.dumps(clean_venues, ensure_ascii=True, indent=2)
-                print(output)
-            else:
-                print("[]")
-        except Exception as e:
-            print(f"Error: {{str(e)}}")
+        lat, lng = geocode_address(location)
+        venues = get_venues_by_budget_and_requests(
+            lat=lat, lng=lng, radius=radius, place_type=event_type,
+            keyword=event_type, budget_per_person=budget,
+            special_request=special_requests, event_time=date, max_results=max_results
+        )
+        
+        if venues:
+            clean_venues = []
+            for venue in venues:
+                clean_venue = {{}}
+                for key, value in venue.items():
+                    if isinstance(value, str):
+                        clean_value = value.encode('ascii', 'ignore').decode('ascii')
+                        clean_venue[key] = clean_value
+                    else:
+                        clean_venue[key] = value
+                clean_venues.append(clean_venue)
+            output = json.dumps(clean_venues, ensure_ascii=True, indent=2)
+            print(output)
+        else:
             print("[]")
         ```
         

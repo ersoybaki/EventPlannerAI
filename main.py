@@ -5,8 +5,6 @@ from agents import create_preference_agents
 sys.path.insert(0, r'C:\Users\20231455\OneDrive - TU Eindhoven\Desktop\AI Agents\EventPlannerAI')
 import streamlit as st
 
-
-
 load_dotenv()
 gmaps = googlemaps.Client(key=os.environ.get("GOOGLEMAPS_API_KEY"))
 
@@ -14,10 +12,10 @@ llm_config = {
     "model": "gpt-4.1-mini",  
     "api_key": os.environ.get("OPENAI_API_KEY")
 }
+
 def custom_speaker_selection(last_speaker, groupchat):
     messages = groupchat.messages
     
-    print(f"Speaker selection: Last speaker = {last_speaker.name if last_speaker else 'None'}, Total messages = {len(messages)}")
     
     # Get the current state of collected information
     state = {
@@ -50,9 +48,11 @@ def custom_speaker_selection(last_speaker, groupchat):
                 state["special_requests"] = True
             elif '{"fallback":' in content:
                 state["fallback_json_ready"] = True
-            # Check if user made a fallback choice (just a number)
+
+            # Fallback choice made
             elif content.strip() in ["1", "2", "3", "4", "5"] and any("Would you like me to try" in m.get("content", "") for m in messages[-3:]):
                 state["fallback_choice_made"] = True
+
             # Check if recommendation agent is asking for fallback details
             elif any(phrase in content.lower() for phrase in [
                 "how much larger should i search",
@@ -62,7 +62,6 @@ def custom_speaker_selection(last_speaker, groupchat):
             ]):
                 state["waiting_for_fallback_details"] = True
     
-    print(f"Current state: {state}")
     
     selected_agent = None
     
@@ -89,10 +88,9 @@ def custom_speaker_selection(last_speaker, groupchat):
         
         # Fallback flow handling
         elif user_msg.strip() in ["1", "2", "3", "4", "5"]:
-            # User just chose a fallback option number
             selected_agent = groupchat.agent_by_name("Event_Recommendation_Agent")
+        # User provided details for fallback 
         elif state["waiting_for_fallback_details"]:
-            # User provided details for fallback (like "Amsterdam" or "double the area")
             selected_agent = groupchat.agent_by_name("Event_Recommendation_Agent")
     
     # Handle preference agents
@@ -155,7 +153,7 @@ def custom_speaker_selection(last_speaker, groupchat):
                 # Recommendation agent asked a question, wait for user input
                 selected_agent = groupchat.agent_by_name("Event_Preference_Proxy_Agent")
             else:
-                # Could be normal recommendations or end of conversation
+                # End of conversation
                 selected_agent = None
     
     # Start conversation
@@ -182,6 +180,7 @@ def extract_message_content(msg):
         return content.get('content', str(content))
     
     return str(content)
+
 def process_chat_messages():
     if "manager" not in st.session_state:
         return
@@ -194,8 +193,6 @@ def process_chat_messages():
     if "displayed_questions" not in st.session_state:
         st.session_state.displayed_questions = set()
     
-    # Debug print
-    print(f"Processing {len(messages)} messages, already processed: {len(st.session_state.processed_indices)}")
     
     new_messages_found = False
     
@@ -215,8 +212,6 @@ def process_chat_messages():
         else:
             continue
         
-        # Debug print
-        print(f"Processing message {i} from {name} (role: {role}): {content[:50]}...")
         
         # Skip empty messages
         if not content or content.strip() == "":
@@ -226,7 +221,7 @@ def process_chat_messages():
         if name == "Coordinator_Agent":
             continue
             
-        # Skip proxy agent messages (both user and assistant roles)
+        # Skip proxy agent messages
         if name == "Event_Preference_Proxy_Agent":
             continue
         
@@ -244,7 +239,7 @@ def process_chat_messages():
                 if not line or line.startswith('{') or "TERMINATE" in line.upper():
                     continue
                 
-                # This is a question/statement from the agent
+                # Question/statement from the agent
                 if line not in st.session_state.displayed_questions:
                     st.session_state.displayed_questions.add(line)
                     # Check if it's already in history
@@ -255,12 +250,12 @@ def process_chat_messages():
                 break
             
         elif name in ["Code_Generator_Agent", "Code_Executor_Agent"]:
-            # IMPORTANT: Check for venue data FIRST, before skipping
+            # Check for venue data FIRST, before skipping
             if name == "Code_Executor_Agent":
                 content_stripped = content.strip()
-                    # Handle different output formats
                 json_content = None
-                
+
+                # Handle different output formats
                 # Format 1: "exitcode: 0 (execution succeeded)\nCode output:\n[JSON]"
                 if "exitcode:" in content_stripped and "Code output:" in content_stripped:
                     parts = content_stripped.split("Code output:", 1)
@@ -283,7 +278,7 @@ def process_chat_messages():
                             # Store venues for map display
                             st.session_state.current_venues = venues_data
                             st.session_state.show_map = True
-                            print(f"✓ Captured {len(venues_data)} venues for map display")
+                            print(f"Captured {len(venues_data)} venues for map display")
                             
                             # Debug first venue
                             first_venue = venues_data[0]
@@ -299,7 +294,7 @@ def process_chat_messages():
                     except Exception as e:
                         print(f"Error processing venues: {e}")
             
-            # NOW do the regular skipping for display purposes
+            # regular skipping for display purposes
             if not (content.strip().startswith('{') or 
                    content.strip().startswith('[') or 
                    content.strip().startswith('exitcode') or
@@ -309,18 +304,19 @@ def process_chat_messages():
                     new_messages_found = True
 
         elif name == "Event_Recommendation_Agent":
-            # Handle recommendation agent messages - show everything except JSON
+            # show everything except JSON
             if not content.strip().startswith('{'):
                 if content not in [h[1] for h in st.session_state.history]:
-                    st.session_state.history.append(("assistant", content))
-                    new_messages_found = True
-                    
-                    # Check if this is the venue recommendations
+                    # Check if this is the venue recommendations then add to history
                     if "Address:" in content and "Rating:" in content:
-                        # Venue recommendations are being displayed
+                        # Store recommendations separately instead of adding to history
+                        st.session_state.venue_recommendations = content
                         st.session_state.show_map = True
-                        print("✓ Venue recommendations detected, enabling map display")
-        
+                        print("Venue recommendations detected, enabling map display")
+                    else:
+                        # Add non-recommendation messages to history normally
+                        st.session_state.history.append(("assistant", content))
+                    new_messages_found = True
     # If new messages were found, trigger a rerun
     return new_messages_found
 
@@ -363,6 +359,7 @@ if "initialized" not in st.session_state:
     st.session_state.displayed_questions = set()
     st.session_state.current_venues = None  
     st.session_state.show_map = False  
+    st.session_state.venue_recommendations = None
 
 if not st.session_state.initialized:
     # Create all agents
@@ -427,47 +424,42 @@ for role, text in st.session_state.history:
         st.markdown(text)
 
 if st.session_state.get("show_map", False) and st.session_state.get("current_venues"):
-    # Create a container for the map
-    st.write("DEBUG: Map should display now")
-    st.write(f"show_map: {st.session_state.get('show_map')}")
-    st.write(f"current_venues exists: {st.session_state.get('current_venues') is not None}")
-    st.write(f"Number of venues: {len(st.session_state.get('current_venues', []))}")
-    
     map_container = st.container()
     with map_container:
-        st.markdown("### 📍 Venue Locations")
-        # DEBUG: Show what we're about to map
-        st.write(f"Debug: About to map {len(st.session_state.current_venues)} venues")
-        for i, venue in enumerate(st.session_state.current_venues[:2]):  # Show first 2
-            st.write(f"Venue {i+1}: {venue.get('name', 'Unknown')}")
-            if 'geometry' in venue and 'location' in venue['geometry']:
-                loc = venue['geometry']['location']
-                st.write(f"  Location: {loc['lat']}, {loc['lng']}")
+        st.markdown("## Venue Locations")
+        st.markdown("### Click on the markers to see venue details.")
         
         try:
             from helperFunctions import create_venue_map
             create_venue_map(st.session_state.current_venues)
-            st.write("✓ Map displayed successfully")
         except Exception as e:
             st.error(f"Error: {str(e)}")
             st.write("Full error:", e)
             import traceback
             st.write(traceback.format_exc())
-    # Reset the flag so map doesn't show multiple times
-    st.session_state.show_map = False
-else:
-    # Debug why map isn't showing
-    st.sidebar.markdown("### Map Debug")
-    st.sidebar.markdown(f"show_map: {st.session_state.get('show_map', False)}")
-    st.sidebar.markdown(f"current_venues: {st.session_state.get('current_venues') is not None}")
 
-# Optional: Add map toggle button if venues exist
-if st.session_state.get("current_venues"):
-    col1, col2, col3 = st.columns([1, 1, 4])
-    with col1:
-        if st.button("🗺️ Show Map Again"):
-            st.session_state.show_map = True
-            st.rerun()
+    if st.session_state.get("venue_recommendations"):
+        with st.chat_message("assistant"):
+            st.markdown("## Venue Recommendations")
+        
+            # Clean up the recommendation text
+            recommendations = st.session_state.venue_recommendations
+            
+            # Remove any markdown code block indicators if present
+            if recommendations.startswith("```markdown"):
+                recommendations = recommendations.replace("```markdown", "", 1)
+            if recommendations.endswith("```"):
+                recommendations = recommendations.rsplit("```", 1)[0]
+            
+            # Remove TERMINATE if present
+            recommendations = recommendations.replace("TERMINATE", "").strip()
+            
+            # Display the cleaned recommendations
+            st.markdown(recommendations)
+    
+    # Reset the flags
+    st.session_state.show_map = False
+    st.session_state.venue_recommendations = None
 
 # Chat input - THIS SHOULD COME AFTER THE MAP DISPLAY
 user_input = st.chat_input("Type your message here...")
@@ -527,6 +519,6 @@ with st.sidebar:
     st.markdown("3. What is your budget per person? ")
     st.markdown("4. What date and time is the event? ")
     st.markdown("5. Where is the event located? ")
-    st.markdown("6. Do you have any special requests or dietary requirements? ")
+    st.markdown("6. Do you have any special requests? ")
     st.markdown("7. I'll find the perfect venues for you!")
     
