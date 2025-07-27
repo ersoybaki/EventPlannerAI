@@ -331,6 +331,22 @@ def message_validator(messages):
             return False
     return True
 
+def reset_session_state():
+    """Reset all session state variables to restart the event planner"""
+    keys_to_reset = [
+        "initialized", "history", "chat_started", "coordinator_agent",
+        "displayed_messages", "processed_indices", "displayed_questions",
+        "current_venues", "show_map", "venue_recommendations", "manager",
+        "proxy", "waiting_for_response"
+    ]
+    
+    for key in keys_to_reset:
+        if key in st.session_state:
+            del st.session_state[key]
+    
+    # Reset shown set instead of deleting it
+    st.session_state.shown = set()
+
 # UI Setup
 st.set_page_config(
     page_title="Event Planner AI",
@@ -511,7 +527,12 @@ if user_input:
 # Sidebar
 with st.sidebar:
     st.header("Steps to Plan Your Event")
-  
+    
+    # Add restart button at the top of sidebar
+    if st.button("Restart New Event Planning", type="primary", use_container_width=True):
+        reset_session_state()
+        st.rerun()
+    
     st.markdown("---")
     st.markdown("### Steps:")
     st.markdown("1. What type of event are you planning? ")
