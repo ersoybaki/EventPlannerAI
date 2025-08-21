@@ -4,17 +4,16 @@ from dotenv import load_dotenv
 import os, sys, googlemaps
 import streamlit as st
 
-sys.path.insert(0, r'C:\Users\20231455\OneDrive - TU Eindhoven\Desktop\AI Agents\EventPlannerAI')
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+    
+CODING_DIR = os.path.join(ROOT_DIR, "coding")
+os.makedirs(CODING_DIR, exist_ok=True)
 from helperFunctions import geocode_address, search_nearby_venues, dietary_request, get_venues_by_budget, get_venues_by_budget_and_requests, get_event_day_and_time, get_venue_opening_hours, is_open
 
-
-gmaps = googlemaps.Client(key=os.environ.get("GOOGLEMAPS_API_KEY"))
-
 load_dotenv()
-llm_config = {
-    "model": "gpt-4.1-mini",
-    "api_key": os.environ.get("OPENAI_API_KEY")
-}
 
 if "shown" not in st.session_state:
     st.session_state.shown = set()  
@@ -68,37 +67,54 @@ class DisplayingUserProxyAgent(UserProxyAgent):
     
     
 # Creating Agents for Event Planning Preferences
-def create_preference_agents():
+def create_preference_agents(openai_key=None, google_key=None):
+    # Use provided keys or fall back to environment variables
+    api_key = openai_key or os.environ.get("OPENAI_API_KEY")
+    gmaps_key = google_key or os.environ.get("GOOGLEMAPS_API_KEY")
+    
+    # Initialize Google Maps client with the provided key
+    gmaps = googlemaps.Client(key=gmaps_key)
+    
+    # Set environment variables for helper functions to use
+    if google_key:
+        os.environ["GOOGLEMAPS_API_KEY"] = google_key
+    
+    llm_config = {
+        "model": "gpt-4o-mini",
+        "api_key": api_key
+    }
+    
     preference_event_type_agent = DisplayingConversableAgent(
         name="Event_Type_Preference_Agent",
-        system_message="""
-        You are responsible for getting the event type from the user and normalizing it.
-        
-        IMPORTANT: Your conversation flow should be:
-        1. Ask the user: "Hi! I'm here to help you plan the perfect event. What type of event are you thinking about? (e.g., dinner party, drinks with friends, coffee meetup, museum visit, etc.)"
-        2. Take their answer and map it to a Google Places API type
-        3. Respond ONLY with the JSON format specified below
-        4. Then say TERMINATE
-        
-        Mapping rules:  
-        - dinner, lunch, brunch, meal, food, banquet, dinner party → restaurant
-        - drinks, cocktails, happy hour, night out → bar  
-        - coffee, café, tea, coffee shop → cafe
-        - picnic, outdoors, park, green space → park
-        - museum, gallery, art exhibition → museum
-        - hotel, lodging, overnight, stay → hotel
-        - cinema, movie, film screening → movie_theater
-        - gym, fitness, workout, exercise → gym
-        - bookstore, library, books → book_store
-        - sports, stadium, arena, match → stadium
+           system_message="""
+            You collect and normalize the event type.
 
-        DO NOT repeat the question multiple times. Ask once and wait for response.
-        
-        When you have the mapping, respond with EXACTLY this format:
-        {"event_type": "normalized_type"}
-        
-        Then immediately say: TERMINATE
-        """,
+            DECISION RULES (very important):
+            - If the most recent message in the conversation is from the user and looks like an answer
+            (i.e., not a question and not JSON), DO NOT ask anything. Parse it and output the JSON below.
+            - Only ask your question if you have no usable user answer yet.
+            - Never ask the same question twice.
+
+            Mapping rules:
+            - dinner, lunch, brunch, meal, food, banquet, dinner party → restaurant
+            - drinks, cocktails, happy hour, night out → bar
+            - coffee, café, tea, coffee shop → cafe
+            - picnic, outdoors, park, green space → park
+            - museum, gallery, art exhibition → museum
+            - hotel, lodging, overnight, stay → hotel
+            - cinema, movie, film screening → movie_theater
+            - gym, fitness, workout, exercise → gym
+            - bookstore, library, books → book_store
+            - sports, stadium, arena, match → stadium
+
+            Output format (when you have enough info):
+            {"event_type": "normalized_type"}
+            Then say: TERMINATE
+
+            If you truly don't have an answer yet, ask ONCE:
+            "Hi! I'm here to help you plan the perfect event. What type of event are you thinking about?
+            (e.g., dinner party, drinks with friends, coffee meetup, museum visit, etc.)"
+            """,
         llm_config=llm_config,
         code_execution_config=False,
         human_input_mode='NEVER', 
@@ -166,6 +182,7 @@ def create_preference_agents():
         code_execution_config=False,
         human_input_mode='NEVER',
     )
+    
     preference_event_time_agent = DisplayingConversableAgent(
         name="Event_Time_Preference_Agent",
         system_message="""           
@@ -210,7 +227,7 @@ def create_preference_agents():
         system_message="""
         You collect the event location exactly as the user says it.
 
-        IMPORTANT — conversation flow:
+        IMPORTANT – conversation flow:
         1. Ask: "Where would you like to host this event? Please share a city, neighborhood, or specific area you have in mind."
         2. Wait for the user's reply.
         3. Store the reply verbatim.
@@ -243,11 +260,11 @@ def create_preference_agents():
         - Remove punctuation (except hyphens)
         - Trim leading/trailing whitespace
         - If multiple requests are comma-separated, keep them separated by spaces
-        - Ensure it’s a concise keyword or phrase suitable for a Google Places API keyword parameter
+        - Ensure it's a concise keyword or phrase suitable for a Google Places API keyword parameter
         If the input is unclear or too long, ask: "Could you please rephrase as a short keyword or phrase (e.g., 'good wifi', 'quiet environment')?"
         4. If they answer "no" or "none", treat special_requests as None.
         5. Respond with EXACTLY this JSON:
-        {"special_requests": <normalized_string_or_null>}
+        {"special_requests": <normalized_string_or_None>}
         6. Then immediately say: TERMINATE
         """,
         llm_config=llm_config,
@@ -300,6 +317,7 @@ def create_preference_agents():
         code_execution_config=False,
         human_input_mode='NEVER',
     )
+    
     preference_proxy_agent = DisplayingUserProxyAgent(
         name="Event_Preference_Proxy_Agent",
         llm_config=False,
@@ -319,7 +337,7 @@ def create_preference_agents():
     # code executor
     codeExecutor = DisplayingAssistantAgent (
         name="Code_Executor_Agent",
-        code_execution_config={"work_dir": "coding",
+        code_execution_config={"work_dir": CODING_DIR,
                                "use_docker": False,},
         system_message="""You execute Python code and handle results.
         
@@ -373,8 +391,10 @@ def create_preference_agents():
                 sys.stdout.reconfigure(encoding='utf-8')
             except: pass
         
-        sys.path.insert(0, r'C:\\Users\\20231455\\OneDrive - TU Eindhoven\\Desktop\\AI Agents\\EventPlannerAI')
-        
+        ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        if ROOT not in sys.path:
+            sys.path.insert(0, ROOT)
+                
         from helperFunctions import geocode_address, get_venues_by_budget_and_requests
         
         # Original preferences (use the previously collected values)
@@ -384,7 +404,7 @@ def create_preference_agents():
             "budget_per_person": 1000,   # or whatever was collected
             "event_time": "tomorrow evening",  # or whatever was collected
             "location": "Prague",        # or whatever was collected
-            "special_requests": null     # or whatever was collected
+            "special_requests": None     # or whatever was collected
         }}
         
         # Apply fallback modifications if provided

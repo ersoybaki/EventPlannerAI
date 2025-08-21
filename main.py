@@ -2,16 +2,17 @@ from dotenv import load_dotenv
 from autogen import GroupChat, GroupChatManager
 import os, sys, googlemaps
 from agents import create_preference_agents
-sys.path.insert(0, r'C:\Users\20231455\OneDrive - TU Eindhoven\Desktop\AI Agents\EventPlannerAI')
 import streamlit as st
 
-load_dotenv()
-gmaps = googlemaps.Client(key=os.environ.get("GOOGLEMAPS_API_KEY"))
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
-llm_config = {
-    "model": "gpt-4.1-mini",  
-    "api_key": os.environ.get("OPENAI_API_KEY")
-}
+
+CODING_DIR = os.path.join(ROOT_DIR, "coding")
+os.makedirs(CODING_DIR, exist_ok=True)
+
+load_dotenv()
 
 def custom_speaker_selection(last_speaker, groupchat):
     messages = groupchat.messages
@@ -347,6 +348,18 @@ def reset_session_state():
     # Reset shown set instead of deleting it
     st.session_state.shown = set()
 
+def check_api_keys():
+    # Check API Keys from environment or session state
+    openai_key = os.environ.get("OPENAI_API_KEY") or st.session_state.get("openai_api_key")
+    google_key = os.environ.get("GOOGLEMAPS_API_KEY") or st.session_state.get("google_api_key")
+    return bool(openai_key and google_key)
+
+def get_api_keys():
+    # Get API keys
+    openai_key = st.session_state.get("openai_api_key") or os.environ.get("OPENAI_API_KEY")
+    google_key = st.session_state.get("google_api_key") or os.environ.get("GOOGLEMAPS_API_KEY")
+    return openai_key, google_key
+
 # UI Setup
 st.set_page_config(
     page_title="Event Planner AI",
@@ -364,6 +377,77 @@ with col2:
     st.markdown("# Event Planner AI")
     st.markdown("Let me help you plan your perfect event!")
 
+# API Key Configuration Section
+if not check_api_keys():
+    st.warning(":warning: Please configure your API keys to use the Event Planner")
+    
+    with st.container():
+        st.markdown("### API Key Configuration")
+        st.markdown("Your API keys are stored only for this session and are not saved permanently.")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            openai_key_input = st.text_input(
+                "OpenAI API Key",
+                type="password",
+                placeholder="sk-...",
+                help="Get your API key from https://platform.openai.com/api-keys",
+                key="openai_key_input"
+            )
+        
+        with col2:
+            google_key_input = st.text_input(
+                "Google Maps API Key",
+                type="password",
+                placeholder="AIza...",
+                help="Get your API key from https://console.cloud.google.com/",
+                key="google_key_input"
+            )
+        
+        if st.button("Save API Keys", type="primary"):
+            if openai_key_input and google_key_input:
+                st.session_state.openai_api_key = openai_key_input
+                st.session_state.google_api_key = google_key_input
+                
+                # Set environment variables for the current session
+                os.environ["OPENAI_API_KEY"] = openai_key_input
+                os.environ["GOOGLEMAPS_API_KEY"] = google_key_input
+
+                st.success(":white_check_mark: API keys configured successfully! The page will refresh.")
+                st.rerun()
+            else:
+                st.error("Please provide both API keys")
+    
+    st.info(":bulb: **Why do I need API keys?**\n\n"
+            "- **OpenAI API Key**: Powers the AI agents that help plan your event\n"
+            "- **Google Maps API Key**: Finds and displays venue locations and information")
+    
+    # Stop until API keys provided
+    st.stop()  
+
+# Get API keys for use
+openai_key, google_key = get_api_keys()
+
+# Initialize Google Maps client with the API key
+try:
+    gmaps = googlemaps.Client(key=google_key)
+except Exception as e:
+    st.error(f"Failed to initialize Google Maps client: {str(e)}")
+    if st.button("Reset API Keys"):
+        if "openai_api_key" in st.session_state:
+            del st.session_state.openai_api_key
+        if "google_api_key" in st.session_state:
+            del st.session_state.google_api_key
+        st.rerun()
+    st.stop()
+
+# Configure LLM with the API key
+llm_config = {
+    "model": "gpt-4o-mini",  
+    "api_key": openai_key
+}
+
 # Initialize session state
 if "initialized" not in st.session_state:
     st.session_state.initialized = False
@@ -378,50 +462,62 @@ if "initialized" not in st.session_state:
     st.session_state.venue_recommendations = None
 
 if not st.session_state.initialized:
-    # Create all agents
-    type_agent, participant_agent, budget_agent, time_agent, \
-    location_agent, request_agent, proxy_agent, executor_agent, \
-    generator_agent, recommendation_agent, coordinator_agent = create_preference_agents()
+    try:
+        # Create all agents with the provided API keys
+        type_agent, participant_agent, budget_agent, time_agent, \
+        location_agent, request_agent, proxy_agent, executor_agent, \
+        generator_agent, recommendation_agent, coordinator_agent = create_preference_agents(
+            openai_key=openai_key,
+            google_key=google_key
+        )
 
-    # Store coordinator agent reference
-    st.session_state.coordinator_agent = coordinator_agent
+        # Store coordinator agent reference
+        st.session_state.coordinator_agent = coordinator_agent
 
-    # Create group chat with proper configuration
-    group_chat = GroupChat(
-        agents=[
-            coordinator_agent,      
-            type_agent,            
-            participant_agent,    
-            budget_agent,          
-            time_agent,           
-            location_agent,      
-            request_agent,        
-            generator_agent,      
-            executor_agent,       
-            recommendation_agent, 
-            proxy_agent          
-        ],
-        messages=[],
-        max_round=50,
-        speaker_selection_method=custom_speaker_selection,
-        allow_repeat_speaker=True
-    )
+        # Create group chat with proper configuration
+        group_chat = GroupChat(
+            agents=[
+                coordinator_agent,      
+                type_agent,            
+                participant_agent,    
+                budget_agent,          
+                time_agent,           
+                location_agent,      
+                request_agent,        
+                generator_agent,      
+                executor_agent,       
+                recommendation_agent, 
+                proxy_agent          
+            ],
+            messages=[],
+            max_round=50,
+            speaker_selection_method=custom_speaker_selection,
+            allow_repeat_speaker=True
+        )
 
-    group_chat.message_validator = message_validator
-    # Initialize manager    
-    st.session_state.manager = GroupChatManager(
-        groupchat=group_chat, 
-        llm_config=llm_config,
-        is_termination_msg=lambda x: False,
-    )
-    
-    st.session_state.proxy = proxy_agent
-    st.session_state.initialized = True 
-    
-    # Add initial greeting
-    st.session_state.history.append(("assistant", "Hello! Welcome to the Event Planner. What type of event would you like to plan?"))
-
-
+        group_chat.message_validator = message_validator
+        # Initialize manager    
+        st.session_state.manager = GroupChatManager(
+            groupchat=group_chat, 
+            llm_config=llm_config,
+            is_termination_msg=lambda x: False,
+        )
+        
+        st.session_state.proxy = proxy_agent
+        st.session_state.initialized = True 
+        
+        # Add initial greeting
+        st.session_state.history.append(("assistant", "Hello! Welcome to the Event Planner. What type of event would you like to plan?"))
+    except Exception as e:
+        st.error(f"Failed to initialize agents: {str(e)}")
+        st.error("Please check your API keys and try again.")
+        if st.button("Reset API Keys"):
+            if "openai_api_key" in st.session_state:
+                del st.session_state.openai_api_key
+            if "google_api_key" in st.session_state:
+                del st.session_state.google_api_key
+            st.rerun()
+        st.stop()
 
 # Continuous message checking
 if st.session_state.initialized and "manager" in st.session_state:
@@ -524,9 +620,15 @@ if user_input:
             traceback.print_exc()
 
     st.rerun()
+
 # Sidebar
 with st.sidebar:
     st.header("Steps to Plan Your Event")
+    
+    # Add API key status indicator
+    if check_api_keys():
+        st.success(":white_check_mark: API Keys Configured")
+
     
     # Add restart button at the top of sidebar
     if st.button("Restart New Event Planning", type="primary", use_container_width=True):
@@ -542,4 +644,3 @@ with st.sidebar:
     st.markdown("5. Where is the event located? ")
     st.markdown("6. Do you have any special requests? ")
     st.markdown("7. I'll find the perfect venues for you!")
-    
