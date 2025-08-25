@@ -37,10 +37,17 @@ class DisplayingAssistantAgent(AssistantAgent):
             msg.get("content") if isinstance(msg, dict)
             else str(msg)
         )
+        # Never display code generated or execution logs from these agents
+        if self.name in ("Code_Generator_Agent", "Code_Executor_Agent"):
+            return super().send(*args, **kwargs)
+        # Hide any code-fenced output (```...```), regardless of agent
+        content_stripped = content.strip() if content else ""
+        if content_stripped.startswith("```"):
+            return super().send(*args, **kwargs)
+        # Otherwise show non-JSON content
         if content and not content.startswith("{"):
             safe_markdown(self.name, content)
         return super().send(*args, **kwargs)
-
 
 class DisplayingConversableAgent(ConversableAgent):
     def send(self, *args, **kwargs):
