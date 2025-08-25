@@ -82,9 +82,6 @@ def create_preference_agents(openai_key=None, google_key=None):
     # Initialize Google Maps client with the provided key
     gmaps = googlemaps.Client(key=gmaps_key)
     
-    # Set environment variables for helper functions to use
-    if google_key:
-        os.environ["GOOGLEMAPS_API_KEY"] = google_key
     
     llm_config = {
         "model": "gpt-4o-mini",
@@ -391,7 +388,7 @@ def create_preference_agents(openai_key=None, google_key=None):
         
         Generate this code structure:
         ```python
-        import sys, json
+        import sys, json, os
         
         if sys.platform == "win32":
             try:

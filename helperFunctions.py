@@ -33,7 +33,22 @@ _GMAPS = None
 def get_gmaps():
     global _GMAPS
     if _GMAPS is None:
-        key = os.environ.get("GOOGLEMAPS_API_KEY")
+        key = None
+
+        # Prefer Streamlit session (when inside the Streamlit app)
+        try:
+            import streamlit as st
+            # Only if Streamlit is actually running
+            if st.runtime.exists():
+                key = st.session_state.get("google_api_key")
+        except Exception:
+            pass
+
+        # Fallbacks for non-Streamlit child processes
+        if not key:
+            key = os.environ.get("RUNTIME_GOOGLEMAPS_API_KEY")  # set by parent before exec
+
+
         if not key:
             raise ValueError("GOOGLEMAPS_API_KEY is not set. Provide it in the UI.")
         _GMAPS = googlemaps.Client(key=key)

@@ -13,6 +13,8 @@ CODING_DIR = os.path.join(ROOT_DIR, "coding")
 os.makedirs(CODING_DIR, exist_ok=True)
 
 load_dotenv()
+os.environ.pop("OPENAI_API_KEY", None)
+os.environ.pop("GOOGLEMAPS_API_KEY", None)
 
 def custom_speaker_selection(last_speaker, groupchat):
     messages = groupchat.messages
@@ -349,15 +351,15 @@ def reset_session_state():
     st.session_state.shown = set()
 
 def check_api_keys():
-    # Check API Keys from environment or session state
-    openai_key = os.environ.get("OPENAI_API_KEY") or st.session_state.get("openai_api_key")
-    google_key = os.environ.get("GOOGLEMAPS_API_KEY") or st.session_state.get("google_api_key")
+    # Check API Keys from session state
+    openai_key = st.session_state.get("openai_api_key")
+    google_key = st.session_state.get("google_api_key")
     return bool(openai_key and google_key)
 
 def get_api_keys():
     # Get API keys
-    openai_key = st.session_state.get("openai_api_key") or os.environ.get("OPENAI_API_KEY")
-    google_key = st.session_state.get("google_api_key") or os.environ.get("GOOGLEMAPS_API_KEY")
+    openai_key = st.session_state.get("openai_api_key")
+    google_key = st.session_state.get("google_api_key")
     return openai_key, google_key
 
 # UI Setup
@@ -410,9 +412,6 @@ if not check_api_keys():
                 st.session_state.openai_api_key = openai_key_input
                 st.session_state.google_api_key = google_key_input
                 
-                # Set environment variables for the current session
-                os.environ["OPENAI_API_KEY"] = openai_key_input
-                os.environ["GOOGLEMAPS_API_KEY"] = google_key_input
 
                 st.success(":white_check_mark: API keys configured successfully! The page will refresh.")
                 st.rerun()
@@ -428,6 +427,9 @@ if not check_api_keys():
 
 # Get API keys for use
 openai_key, google_key = get_api_keys()
+
+if google_key:
+    os.environ["RUNTIME_GOOGLEMAPS_API_KEY"] = google_key
 
 # Initialize Google Maps client with the API key
 try:
