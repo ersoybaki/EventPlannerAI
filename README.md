@@ -1,6 +1,6 @@
 # Event Planner AI  
 
-🌐 **[Launch the App](https://eventplannerai.streamlit.app)**  
+<a href="https://eventplannerai.streamlit.app" target="_blank">🌐 Launch the App</a>
 
 Event Planner AI is an AI-powered assistant that helps you plan events step by step.  
 It collects your preferences (event type, participants, budget, time, location, special requests) and finds the perfect venues using Google Maps API.  
@@ -18,7 +18,7 @@ It collects your preferences (event type, participants, budget, time, location, 
 ---
 
 ## 🖥️ How to Use  
-1. Open the app: [Event Planner AI](https://eventplannerai.streamlit.app)  
+1. Open the app: <a href="https://eventplannerai.streamlit.app" target="_blank">EventPlannerAI</a>
 2. Enter your API keys when prompted:  
    - **OpenAI API Key** → [Get it here](https://platform.openai.com/api-keys)  
    - **Google Maps API Key** → [Get it here](https://console.cloud.google.com/)  
