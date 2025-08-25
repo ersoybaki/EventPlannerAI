@@ -1,0 +1,9 @@
+streamlit>=1.36
+autogen>=0.9.2
+openai>=1.30
+googlemaps>=4.10.0
+python-dotenv>=1.0.1
+parsedatetime>=2.6
+folium>=0.16.0
+streamlit-folium>=0.21.0
+pandas>=2.2.1
